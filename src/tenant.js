@@ -48,17 +48,26 @@ export function tenantFromHeaders(headers) {
  * @returns {Promise<TenantInfo>}
  */
 export async function discoverTenant(registryHref, { fetchImpl = fetch, timeoutMs = 3000, signal } = {}) {
+  // A ref'd timer (AbortSignal.timeout's is unref'd and would let the event
+  // loop drain while a request hangs without holding a handle).
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+  const onAbort = () => ac.abort(signal?.reason);
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener('abort', onAbort, { once: true });
   try {
-    const timeout = AbortSignal.timeout(timeoutMs);
     const res = await fetchImpl(registryHref, {
       method: 'GET',
       redirect: 'manual',
       headers: { 'user-agent': 'ado-npm-exec' },
-      signal: signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([timeout, signal]) : timeout,
+      signal: ac.signal,
     });
     await res.body?.cancel().catch(() => {});
     return tenantFromHeaders(res.headers);
   } catch (error) {
     return { error: /** @type {Error} */ (error)?.message || String(error) };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
   }
 }

@@ -175,7 +175,7 @@ test('runCapture runs a tool from a directory with spaces and parentheses', asyn
       file = path.join(bin, 'az');
       fs.writeFileSync(file, '#!/bin/sh\necho "args:$*"\n', { mode: 0o755 });
     }
-    assert.equal(findOnPath('az', { env: { PATH: bin, PATHEXT: '.CMD' } }), file);
+    assert.equal(findOnPath('az', { env: { PATH: bin, PATHEXT: '.cmd' } }), file);
     const r = await runCapture(file, ['account', 'get-access-token', '--tenant', 'abc-1'], { env: process.env, timeoutMs: 20_000 });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout.trim(), 'args:account get-access-token --tenant abc-1');

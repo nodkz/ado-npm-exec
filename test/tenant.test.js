@@ -59,4 +59,9 @@ test('discoverTenant is best effort', async () => {
   const r = await discoverTenant(FEED, { fetchImpl: hanging, timeoutMs: 50 });
   assert.ok(r.error);
   assert.ok(Date.now() - started < 2000);
+
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 20);
+  const cancelled = await discoverTenant(FEED, { fetchImpl: hanging, timeoutMs: 10_000, signal: ac.signal });
+  assert.ok(cancelled.error, 'an outer abort (e.g. SIGINT) cancels discovery');
 });
