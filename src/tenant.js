@@ -44,16 +44,17 @@ export function tenantFromHeaders(headers) {
 
 /**
  * @param {string} registryHref an allowlisted feed URL
- * @param {{ fetchImpl?: typeof fetch, timeoutMs?: number }} [opts]
+ * @param {{ fetchImpl?: typeof fetch, timeoutMs?: number, signal?: AbortSignal }} [opts]
  * @returns {Promise<TenantInfo>}
  */
-export async function discoverTenant(registryHref, { fetchImpl = fetch, timeoutMs = 3000 } = {}) {
+export async function discoverTenant(registryHref, { fetchImpl = fetch, timeoutMs = 3000, signal } = {}) {
   try {
+    const timeout = AbortSignal.timeout(timeoutMs);
     const res = await fetchImpl(registryHref, {
       method: 'GET',
       redirect: 'manual',
       headers: { 'user-agent': 'ado-npm-exec' },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([timeout, signal]) : timeout,
     });
     await res.body?.cancel().catch(() => {});
     return tenantFromHeaders(res.headers);
