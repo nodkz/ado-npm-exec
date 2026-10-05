@@ -1,0 +1,49 @@
+{
+  "name": "ado-npm-exec",
+  "version": "0.1.0",
+  "description": "Run a package from a private Azure DevOps (Azure Artifacts) npm feed with silent Microsoft Entra ID auth. Zero dependencies. Built for MCP stdio server configs.",
+  "keywords": [
+    "azure-devops",
+    "azure-artifacts",
+    "npm",
+    "npx",
+    "npm-exec",
+    "mcp",
+    "entra-id",
+    "auth"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "ado-npm-exec": "bin/ado-npm-exec.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nodkz/ado-npm-exec.git"
+  },
+  "homepage": "https://github.com/nodkz/ado-npm-exec#readme",
+  "bugs": {
+    "url": "https://github.com/nodkz/ado-npm-exec/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc -p jsconfig.json",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "~5.9.3"
+  }
+}

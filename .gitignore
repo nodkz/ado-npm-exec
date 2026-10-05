@@ -1,3 +1,5 @@
 node_modules/
 *.tgz
 .DS_Store
+# Never commit npm config: it can carry registry credentials or internal URLs.
+.npmrc
