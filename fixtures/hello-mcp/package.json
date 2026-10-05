@@ -1,0 +1,12 @@
+{
+  "name": "@contoso/hello-mcp",
+  "version": "1.0.0",
+  "description": "Test fixture served by a localhost registry in test/real-npm.test.js",
+  "license": "MIT",
+  "bin": {
+    "hello-mcp": "bin.js"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  }
+}
