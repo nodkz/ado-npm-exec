@@ -380,25 +380,36 @@ temp directory is left behind.
 
 ## Publishing
 
-Releases are published by `.github/workflows/publish.yml` when a GitHub release
-is published. The workflow uses npm trusted publishing (OIDC) with provenance:
-no npm token is stored in the repository.
+Publishing is automatic: change `version` in `package.json` and merge to
+`main`. `.github/workflows/publish.yml` runs when `package.json` changes (or
+by hand from the Actions tab):
 
-1. npm only lets you add a trusted publisher to a package that exists, and
-   provenance can only be generated in CI. So publish a throwaway placeholder
-   by hand first, so that the first real version (the one people pin) has
-   provenance: set `version` to `0.0.1`, run
-   `npm publish --access public --provenance=false`, then
-   `npm deprecate ado-npm-exec@0.0.1 "placeholder, use 1.0.0 or later"`.
-2. On npmjs.com, package settings, **Trusted publishing**: add GitHub Actions
-   with this repository, workflow `publish.yml` and environment `npm-publish`.
-3. In the GitHub repository, create the `npm-publish` environment with required
-   reviewers.
-4. Bump `version` in `package.json`, merge, and publish a GitHub release tagged
-   `v<version>`. The workflow checks that the tag matches, runs the tests, and
-   publishes with `--provenance`. The new version reaches users of
-   `packagefeedproxy.microsoft.io` only after its 7-day hold, so update pinned
-   versions in configs after that.
+1. `scripts/publish-check.mjs` asks npm whether that version exists. If it
+   does, nothing happens. A version lower than `latest` is refused, and a
+   prerelease such as `1.1.0-beta.1` goes to the `next` dist-tag.
+2. The tests run, `npm publish --provenance` publishes, and a `v<version>`
+   tag and GitHub release are created.
+
+Authentication is npm trusted publishing (OIDC): no npm token is stored. npm
+only allows it for a package that already exists, so the very first version is
+published with a token, once:
+
+1. On npmjs.com, create a granular access token with read and write access to
+   packages, valid for a few days. Enable "Bypass two-factor authentication" if
+   your account requires 2FA for publishing. Store it as the `NPM_TOKEN`
+   repository secret: `gh secret set NPM_TOKEN -R nodkz/ado-npm-exec`.
+2. Merge the first version to `main` (or re-run the workflow). It is published
+   with provenance.
+3. On npmjs.com, package **Settings** > **Trusted publishing** > GitHub Actions:
+   owner `nodkz`, repository `ado-npm-exec`, workflow `publish.yml`,
+   environment `npm-publish`.
+4. Delete the `NPM_TOKEN` secret, revoke the token, and set **Publishing
+   access** to "Require two-factor authentication and disallow tokens".
+5. Optional: add required reviewers to the `npm-publish` environment so every
+   publish waits for an approval.
+
+A new version reaches users of `packagefeedproxy.microsoft.io` only after its
+7-day hold, so update pinned versions in configs after that.
 
 ## License
 
