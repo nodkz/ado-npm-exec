@@ -290,8 +290,10 @@ Releases are published by `.github/workflows/publish.yml` when a GitHub release
 is published. The workflow uses npm trusted publishing (OIDC) with provenance:
 no npm token is stored in the repository.
 
-1. The first version must be published once by hand (`npm publish --access public`),
-   because npm only lets you add a trusted publisher to an existing package.
+1. The first version must be published once by hand, because npm only lets you
+   add a trusted publisher to an existing package. Provenance can only be
+   generated in CI, so turn it off for this one manual publish:
+   `npm publish --access public --provenance=false`.
 2. On npmjs.com, package settings, **Trusted publishing**: add GitHub Actions
    with this repository, workflow `publish.yml` and environment `npm-publish`.
 3. In the GitHub repository, create the `npm-publish` environment with required

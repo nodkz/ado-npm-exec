@@ -1,0 +1,3 @@
+# Keep LF everywhere (Windows runners default to core.autocrlf=true): the bin's
+# shebang and the fixture scripts must stay byte-identical across platforms.
+* text=auto eol=lf

@@ -77,7 +77,7 @@ test('package.json is ready for a provenance publish', () => {
   assert.equal(pkg.publishConfig.access, 'public');
   assert.match(pkg.repository.url, /^git\+https:\/\/github\.com\/[^/]+\/[^/]+\.git$/);
   const bin = path.join(ROOT, pkg.bin['ado-npm-exec']);
-  assert.match(fs.readFileSync(bin, 'utf8'), /^#!\/usr\/bin\/env node\n/);
+  assert.match(fs.readFileSync(bin, 'utf8'), /^#!\/usr\/bin\/env node\n/, 'LF shebang (see .gitattributes)');
 });
 
 test('the lockfile only references the public npm registry', () => {
