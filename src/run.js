@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
  * Settings forced on the inner npm, at command-line precedence so neither
  * the inherited environment nor any config file can override them:
  * - --yes: never prompt (stdin belongs to the MCP client)
+ * - --scope=: no default scope, so unscoped packages use --registry
  * - --strict-ssl=true: the token only travels over verified TLS
  * - --foreground-scripts=false: install scripts must not inherit our
  *   stdin/stdout, which carry MCP JSON-RPC
@@ -16,6 +17,7 @@ import { spawn } from 'node:child_process';
  */
 export const FORCED_NPM_FLAGS = Object.freeze([
   '--yes',
+  '--scope=',
   '--strict-ssl=true',
   '--foreground-scripts=false',
   '--json=false',

@@ -73,6 +73,43 @@ test('defaults globalconfig the way npm does when the outer npm did not export i
 });
 
 test('without a scope nothing scope-specific is touched', () => {
-  const env = buildInnerEnv({ 'npm_config_@contoso:registry': 'x', npm_config_globalconfig: '/g' }, { ...base, scope: undefined });
-  assert.equal(env['npm_config_@contoso:registry'], 'x');
+  const env = buildInnerEnv({ 'npm_config_@contoso:registry': 'https://x/', npm_config_globalconfig: '/g' }, { ...base, scope: undefined });
+  assert.equal(env['npm_config_@contoso:registry'], 'https://x/');
+});
+
+test('drops the default scope and scoped registries that are not https', () => {
+  const env = buildInnerEnv(
+    {
+      npm_config_scope: 'legacy',
+      'npm_config_@legacy:registry': 'http://contoso.pkgs.visualstudio.com/_packaging/feed/npm/registry/',
+      'NPM_CONFIG_@other:registry': ' HTTP://x/',
+      'npm_config_@ok:registry': 'https://other.example/',
+      npm_config_globalconfig: '/g',
+    },
+    { ...base, scope: undefined },
+  );
+  assert.deepEqual(Object.keys(env).sort(), ['npm_config_@ok:registry', 'npm_config_globalconfig', 'npm_config_userconfig']);
+});
+
+test('replaces the global config path that `npm exec --prefix=~/` derived', () => {
+  const outer = {
+    npm_config_prefix: '/home/u',
+    npm_config_local_prefix: '/home/u',
+    npm_config_globalconfig: '/home/u/etc/npmrc',
+  };
+  const env = buildInnerEnv(outer, { ...base, platform: 'linux', execPath: '/opt/node/bin/node' });
+  assert.equal(env.npm_config_globalconfig, '/opt/node/etc/npmrc');
+  const withPrefixEnv = buildInnerEnv({ ...outer, PREFIX: '/p' }, { ...base, platform: 'linux', execPath: '/opt/node/bin/node' });
+  assert.equal(withPrefixEnv.npm_config_globalconfig, '/p/etc/npmrc');
+  // A prefix from config files (not --prefix) leaves globalconfig alone.
+  const configured = buildInnerEnv(
+    { npm_config_prefix: '/home/u/.npm-global', npm_config_local_prefix: '/work/project', npm_config_globalconfig: '/home/u/.npm-global/etc/npmrc' },
+    { ...base, platform: 'linux', execPath: '/opt/node/bin/node' },
+  );
+  assert.equal(configured.npm_config_globalconfig, '/home/u/.npm-global/etc/npmrc');
+  const win = buildInnerEnv(
+    { npm_config_prefix: 'C:\\Users\\u', npm_config_local_prefix: 'c:\\users\\u', npm_config_globalconfig: 'C:\\Users\\u\\etc\\npmrc' },
+    { ...base, platform: 'win32', execPath: 'C:\\nodejs\\node.exe' },
+  );
+  assert.equal(win.npm_config_globalconfig, 'C:\\nodejs\\etc\\npmrc');
 });

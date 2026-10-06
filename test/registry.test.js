@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import path from 'node:path';
 import { validateRegistryUrl, parseSpec, RegistryError, SpecError, ADO_RESOURCE_ID } from '../src/registry.js';
+import { resolveNpm } from '../src/npm-cli.js';
 
 test('ADO resource id is the public Azure DevOps application id', () => {
   assert.equal(ADO_RESOURCE_ID, '499b84ac-1321-427f-aa17-267ca6975798');
@@ -108,3 +111,39 @@ for (const bad of [
     assert.throws(() => parseSpec(bad), SpecError);
   });
 }
+
+for (const bad of ['tool@.', '@contoso/tool@..', 'tool@.1', 'tool@.x', 'tool@payload.tgz', 'tool@x.tar', 'tool@x.TAR.GZ']) {
+  test(`parseSpec rejects local-path suffix ${bad}`, () => {
+    assert.throws(() => parseSpec(bad), /looks like a local path|invalid package spec/);
+  });
+}
+
+// Every spec we accept must be a registry spec for npm itself.
+const npm = resolveNpm({ env: process.env });
+test('accepted specs are registry specs for npm-package-arg', { skip: npm ? false : 'npm not found' }, () => {
+  assert.ok(npm);
+  const require = createRequire(npm.cli);
+  const npa = require(path.join(path.dirname(path.dirname(npm.cli)), 'node_modules', 'npm-package-arg'));
+  const corpus = [
+    'tool', 'tool@latest', 'tool@next', 'tool@1.2.3', 'tool@^1.2.0', 'tool@~1.2', 'tool@1.x', 'tool@*', 'tool@>=1 <2',
+    'tool@1 || 2', 'tool@1.0.0-beta.1', 'tool@1.0.0+build.5', '@contoso/tool', '@contoso/tool@latest', '@contoso/my.tool@=1.0.0',
+    'tool@.', 'tool@..', 'tool@.1', 'tool@a.tgz', 'tool@a.tar', 'tool@a.tar.gz', 'tool@~/x', 'tool@/x', 'tool@C:x', 'tool@file:x',
+    'tool@npm:other', 'tool@git+https://x', 'tool@github:a/b', 'tool@https://x', 'tool@a/b', 'tool@a#b', '~tool', '.tool', '-tool',
+    'tool@', 'tool@ ', 'tool@-1', 'tool@v1', 'tool@=1', 'tool@<1', 'tool@1.2.3 - 2.3.4', 'tool@x.tgz.bak', 'tool@1.tgz1',
+  ];
+  let accepted = 0;
+  for (const raw of corpus) {
+    let ok = false;
+    try {
+      parseSpec(raw);
+      ok = true;
+    } catch {
+      // rejected
+    }
+    if (!ok) continue;
+    accepted++;
+    const parsed = npa(raw);
+    assert.equal(parsed.registry, true, `${raw} is accepted but npm treats it as ${parsed.type}`);
+  }
+  assert.ok(accepted >= 15, `accepted ${accepted}`);
+});

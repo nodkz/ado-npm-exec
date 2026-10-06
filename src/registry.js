@@ -115,5 +115,11 @@ export function parseSpec(raw) {
     );
   }
   const [, scope, base, range] = m;
+  // npm-package-arg treats a suffix starting with "." (".", "..", ".x") as a
+  // directory and one ending in .tgz/.tar/.tar.gz as a tarball file: both would
+  // run local content instead of the package from the feed.
+  if (range !== undefined && (range.startsWith('.') || /\.(?:tgz|tar|tar\.gz)$/i.test(range))) {
+    throw new SpecError(`invalid package spec ${JSON.stringify(raw)}: ${JSON.stringify(range)} looks like a local path`);
+  }
   return { raw, name: scope ? `@${scope}/${base}` : base, scope, range };
 }

@@ -27,6 +27,9 @@ const DROPPED = new Set(
     'npm_config_workspace',
     'npm_config_workspaces',
     'npm_config_include_workspace_root',
+    // A default scope makes npm resolve unscoped packages through
+    // `@<scope>:registry` instead of --registry.
+    'npm_config_scope',
   ].map(normalize),
 );
 
@@ -37,29 +40,46 @@ const DROPPED = new Set(
  * @returns {NodeJS.ProcessEnv}
  */
 export function buildInnerEnv(parentEnv, { npmrcFile, registryHost, scope, platform = process.platform, execPath = process.execPath }) {
+  const p = platform === 'win32' ? path.win32 : path.posix;
   const feedHostPrefix = normalize(`npm_config_//${registryHost}`);
   const scopeKey = scope ? normalize(`npm_config_@${scope}:registry`) : undefined;
   /** @type {string | undefined} */ let inheritedPrefix;
+  /** @type {string | undefined} */ let localPrefix;
   /** @type {string | undefined} */ let envPrefix;
-  let hasGlobalconfig = false;
+  /** @type {string | undefined} */ let globalconfig;
   /** @type {NodeJS.ProcessEnv} */
   const out = {};
   for (const [key, value] of Object.entries(parentEnv)) {
     if (value === undefined) continue;
     const n = normalize(key);
     if (n === 'npm_config_prefix' && value) inheritedPrefix = value;
+    if (n === 'npm_config_local_prefix' && value) localPrefix = value;
     if (n === 'prefix' && value) envPrefix = value;
-    if (n === 'npm_config_globalconfig' && value) hasGlobalconfig = true;
+    if (n === 'npm_config_globalconfig' && value) globalconfig = value;
     if (DROPPED.has(n) || n === scopeKey || n.startsWith(feedHostPrefix) || n.startsWith('ado_npm_exec_')) continue;
+    // A scoped registry over plain http on the feed's host would receive the
+    // token (npm matches credentials by host and path, not by protocol).
+    if (/^npm_config_@[^:]+:registry$/.test(n) && !/^https:\/\//i.test(value.trim())) continue;
     out[key] = value;
   }
   out.npm_config_userconfig = npmrcFile;
-  if (!hasGlobalconfig) {
-    // The inner npm gets --prefix=<temp dir>, which would also move npm's
-    // default global config to <temp dir>/etc/npmrc. Point it back at the
-    // real one, located the way npm itself does it.
-    const p = platform === 'win32' ? path.win32 : path.posix;
-    const prefix = inheritedPrefix || envPrefix || (platform === 'win32' ? p.dirname(execPath) : p.dirname(p.dirname(execPath)));
+
+  // The inner npm gets --prefix=<temp dir>, which also moves npm's default
+  // global config to <temp dir>/etc/npmrc. The outer `npm exec --prefix=~/`
+  // has the same effect and exports ~/etc/npmrc. In both cases point npm at
+  // the real global config (proxy and CA settings often live there), located
+  // the way npm itself does it. An explicitly configured one is kept.
+  const same = (/** @type {string} */ a, /** @type {string} */ b) =>
+    platform === 'win32' ? p.resolve(a).toLowerCase() === p.resolve(b).toLowerCase() : p.resolve(a) === p.resolve(b);
+  const derivedFromCliPrefix =
+    globalconfig !== undefined &&
+    inheritedPrefix !== undefined &&
+    localPrefix !== undefined &&
+    same(inheritedPrefix, localPrefix) &&
+    same(globalconfig, p.join(inheritedPrefix, 'etc', 'npmrc'));
+  if (globalconfig === undefined || derivedFromCliPrefix) {
+    const nodePrefix = platform === 'win32' ? p.dirname(execPath) : p.dirname(p.dirname(execPath));
+    const prefix = envPrefix || (derivedFromCliPrefix ? undefined : inheritedPrefix) || nodePrefix;
     out.npm_config_globalconfig = p.join(prefix, 'etc', 'npmrc');
   }
   return out;
