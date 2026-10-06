@@ -15,6 +15,74 @@ prompt:
   supply chain is just Node.js and npm);
 - published from GitHub Actions with npm provenance.
 
+## How it works
+
+`ado-npm-exec` itself comes anonymously from the public npm registry. Your
+package comes from the private feed, with a Microsoft Entra ID token that is
+only ever sent to that feed. The inner npm talks to the feed alone; public
+dependencies reach it through the feed's upstream sources.
+
+```mermaid
+flowchart TB
+    client["MCP client<br/>(VS Code, Copilot CLI)"]
+    outer["npm exec (outer)"]
+    ane["ado-npm-exec"]
+    az["az / azureauth"]
+    inner["npm exec (inner)"]
+    server["MCP server<br/>@contoso/my-mcp"]
+    npmjs[("registry.npmjs.org<br/>public")]
+    entra["Microsoft Entra ID"]
+    feed[("Azure Artifacts feed<br/>private")]
+
+    client -- spawns --> outer
+    outer -- "1) anonymous:<br/>fetch ado-npm-exec" --> npmjs
+    outer -- runs --> ane
+    ane -- "2) silent token request" --> az
+    az -- "existing login session" --> entra
+    ane -- "3) runs with a temp .npmrc" --> inner
+    inner -- "4) Bearer token:<br/>fetch @contoso/my-mcp" --> feed
+    feed -. "public dependencies<br/>via its upstream" .-> npmjs
+    inner -- runs --> server
+    client <-. "5) JSON-RPC over stdin/stdout" .-> server
+```
+
+Step by step:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as MCP client
+    participant Outer as npm exec (outer)
+    participant NPMJS as registry.npmjs.org
+    participant ANE as ado-npm-exec
+    participant AZ as az / azureauth
+    participant Inner as npm exec (inner)
+    participant Feed as Azure Artifacts feed
+    participant Server as MCP server
+
+    Client->>Outer: npm exec --registry=npmjs -- ado-npm-exec@<pinned> --registry <feed> -- @contoso/my-mcp
+    Outer->>NPMJS: GET ado-npm-exec@<pinned> (anonymous)
+    NPMJS-->>Outer: tarball (zero dependencies, with provenance)
+    Outer->>ANE: start (its env points npm at npmjs)
+    Note over ANE: check the feed URL against the allowlist
+    alt ADO_NPM_EXEC_TOKEN is set
+        Note over ANE: use it (must be an Entra ID JWT)
+    else
+        ANE->>Feed: anonymous GET (no credentials, no redirects)
+        Feed-->>ANE: 401 + tenant id
+        ANE->>AZ: az account get-access-token --tenant <id><br/>(then azureauth, silent only)
+        AZ-->>ANE: Entra ID access token (JWT)
+    end
+    Note over ANE: check audience, expiry, tenant<br/>write the token to a private temp .npmrc (0600)<br/>drop inherited npm settings that point at npmjs
+    ANE->>Inner: node npm-cli.js exec --prefix=<temp> --registry=<feed> -- @contoso/my-mcp
+    Inner->>Feed: GET package + tarballs (Authorization: Bearer)
+    Feed-->>Inner: @contoso/my-mcp and its dependencies
+    Inner->>Server: start the package's bin
+    Client->>Server: JSON-RPC request (stdin)
+    Server-->>Client: JSON-RPC response (stdout)
+    Note over ANE: on exit or the first signal: delete the temp .npmrc,<br/>forward the signal, pass the exit code back
+```
+
 ## Quick start
 
 1. Sign in once with the Azure CLI (the same session `az` and most Azure tools
