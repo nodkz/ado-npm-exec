@@ -44,9 +44,47 @@ function defaultIsExecutable(p) {
 }
 
 /**
- * Resolve an executable on PATH. Empty and relative PATH entries are
- * skipped: they resolve against the current directory, which an MCP client
- * typically sets to an arbitrary workspace that could plant an `az`.
+ * True for a `node_modules/.bin` directory. `npm exec` puts the workspace's
+ * (and every ancestor's) `node_modules/.bin` at the front of PATH, so any
+ * dependency installed there could shadow `az`, `azureauth` or `npm`.
+ *
+ * @param {string} dir
+ * @param {boolean} win
+ */
+export function isNodeModulesBin(dir, win) {
+  const parts = dir.split(win ? /[\\/]+/ : /\/+/).filter(Boolean);
+  const [a, b] = parts.slice(-2).map((s) => (win ? s.toLowerCase() : s));
+  return a === 'node_modules' && b === '.bin';
+}
+
+/**
+ * Remove `node_modules/.bin` entries from PATH (all case variants of the key),
+ * for the environment of the authentication helpers.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {NodeJS.Platform} [platform]
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function withoutNodeModulesBins(env, platform = process.platform) {
+  const win = platform === 'win32';
+  const delimiter = win ? ';' : ':';
+  /** @type {NodeJS.ProcessEnv} */
+  const out = { ...env };
+  for (const key of Object.keys(out)) {
+    if (key.toLowerCase() !== 'path' || out[key] === undefined) continue;
+    out[key] = /** @type {string} */ (out[key])
+      .split(delimiter)
+      .filter((d) => !isNodeModulesBin(win ? d.replace(/^"(.*)"$/, '$1') : d, win))
+      .join(delimiter);
+  }
+  return out;
+}
+
+/**
+ * Resolve an executable on PATH. Skipped entries:
+ * - empty and relative ones: they resolve against the current directory,
+ *   which an MCP client typically sets to an arbitrary workspace;
+ * - `node_modules/.bin` ones: `npm exec` adds the workspace's there.
  *
  * @param {string} cmd
  * @param {{ env: NodeJS.ProcessEnv, platform?: NodeJS.Platform,
@@ -60,7 +98,7 @@ export function findOnPath(cmd, { env, platform = process.platform, isFile = def
   for (let dir of (getEnv(env, 'PATH') || '').split(p.delimiter)) {
     if (win) dir = dir.replace(/^"(.*)"$/, '$1');
     const absolute = win ? /^(?:[A-Za-z]:[\\/]|\\\\[^\\])/.test(dir) : p.isAbsolute(dir);
-    if (!dir || !absolute) continue;
+    if (!dir || !absolute || isNodeModulesBin(dir, win)) continue;
     for (const ext of exts) {
       const candidate = p.join(dir, cmd + ext);
       if (isFile(candidate) && (win || isExecutable(candidate))) return candidate;
@@ -71,9 +109,10 @@ export function findOnPath(cmd, { env, platform = process.platform, isFile = def
 
 /**
  * How to spawn `file` without a shell where possible. Windows batch files
- * (`az.cmd`) cannot run without cmd.exe; Node then joins command and
- * arguments unquoted, so the path is quoted here and anything cmd.exe could
- * reinterpret is refused.
+ * (`az.cmd`) cannot run without cmd.exe. The command line is built here (the
+ * path quoted, arguments limited to characters cmd.exe treats literally) and
+ * passed as a single string: Node 24+ deprecates `shell: true` with an
+ * argument array (DEP0190).
  *
  * @param {string} file absolute path
  * @param {readonly string[]} args
@@ -86,25 +125,28 @@ export function buildCommand(file, args, platform) {
   for (const a of args) {
     if (!/^[A-Za-z0-9._:/=-]+$/.test(a)) throw new Error(`refusing to pass ${JSON.stringify(a)} through cmd.exe`);
   }
-  return { command: `"${file}"`, args: [...args], shell: true };
+  return { command: [`"${file}"`, ...args].join(' '), args: [], shell: true };
 }
 
 /**
- * Kill a child and everything it started. POSIX children are spawned as
- * process-group leaders, so the group is killed; Windows uses taskkill /T
- * from System32 (never from PATH).
+ * Stop a captured child and everything it started. POSIX children are
+ * spawned as process-group leaders: the group gets SIGTERM, then SIGKILL
+ * after `graceMs` (az writes a token cache; give it a chance to finish).
+ * Windows uses taskkill /T /F from System32 (never from PATH).
  *
  * @param {import('node:child_process').ChildProcess} child
  * @param {NodeJS.Platform} [platform]
  * @param {NodeJS.ProcessEnv} [env]
+ * @param {number} [graceMs]
  */
-export function killProcessTree(child, platform = process.platform, env = process.env) {
+export function killProcessTree(child, platform = process.platform, env = process.env, graceMs = 1500) {
   if (child.pid === undefined) return;
+  const pid = child.pid;
   if (platform === 'win32') {
     if (child.exitCode !== null || child.signalCode !== null) return;
     const root = getEnv(env, 'SystemRoot') || 'C:\\Windows';
     try {
-      spawn(path.win32.join(root, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], {
+      spawn(path.win32.join(root, 'System32', 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'], {
         stdio: 'ignore',
         windowsHide: true,
       })
@@ -116,7 +158,14 @@ export function killProcessTree(child, platform = process.platform, env = proces
     }
   } else {
     try {
-      process.kill(-child.pid, 'SIGKILL');
+      process.kill(-pid, 'SIGTERM');
+      setTimeout(() => {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          // group already gone
+        }
+      }, graceMs).unref();
       return;
     } catch {
       // not a group leader; fall through

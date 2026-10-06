@@ -5,6 +5,7 @@ import {
   azArgs,
   azureauthArgs,
   azureauthEnv,
+  azEnv,
   buildHint,
   TokenError,
   AbortedError,
@@ -97,7 +98,8 @@ test('falls back to azureauth with PAT paths disabled and silent mode forced', a
   assert.equal(r.token, jwt);
   const call = h.calls[0];
   assert.deepEqual(call.args, azureauthArgs(TENANT));
-  assert.deepEqual(azureauthArgs(TENANT), ['ado', 'token', '--output', 'headervalue', '--mode', 'broker', '--timeout', '1', '--tenant', TENANT]);
+  assert.deepEqual(azureauthArgs(TENANT), ['ado', 'token', '--output', 'headervalue', '--timeout', '1', '--tenant', TENANT]);
+  assert.equal(azureauthArgs(TENANT).includes('--mode'), false, '--mode broker breaks azureauth 0.9.5 and skips the cache in 0.9.6');
   assert.deepEqual(call.env, { PATH: '/opt/bin', AZUREAUTH_NO_USER: '1' });
 });
 
@@ -171,4 +173,11 @@ test('an aborted acquisition stops immediately', async () => {
   const h = harness({ az: { stdout: validJwt() } });
   await assert.rejects(acquireToken({ env: {}, signal: ac.signal, ...h.opts }), AbortedError);
   assert.equal(h.calls.length, 0);
+});
+
+test('az and azureauth never see workspace node_modules/.bin on PATH', async () => {
+  const h = harness({ az: { code: 1, stderr: "Please run 'az login'" }, azureauth: { stdout: `Bearer ${validJwt()}` } });
+  await acquireToken({ env: { PATH: '/w/node_modules/.bin:/usr/bin' }, platform: 'linux', ...h.opts });
+  assert.deepEqual(h.calls.map((c) => c.env.PATH), ['/usr/bin', '/usr/bin']);
+  assert.deepEqual(azEnv({ PATH: '/a/node_modules/.bin:/b' }, 'linux'), { PATH: '/b' });
 });

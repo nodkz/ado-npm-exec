@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findOnPath, buildCommand, runCapture, getEnv } from '../src/proc.js';
+import { findOnPath, buildCommand, runCapture, getEnv, isNodeModulesBin, withoutNodeModulesBins } from '../src/proc.js';
 
 const node = process.execPath;
 const holdPipes = fileURLToPath(new URL('../fixtures/hold-pipes.js', import.meta.url));
@@ -76,8 +76,8 @@ test('buildCommand quotes Windows batch files and refuses unsafe input', () => {
     shell: false,
   });
   assert.deepEqual(buildCommand('C:\\Program Files (x86)\\CLI2\\wbin\\az.cmd', ['account', '--tenant', 'abc-1'], 'win32'), {
-    command: '"C:\\Program Files (x86)\\CLI2\\wbin\\az.cmd"',
-    args: ['account', '--tenant', 'abc-1'],
+    command: '"C:\\Program Files (x86)\\CLI2\\wbin\\az.cmd" account --tenant abc-1',
+    args: [],
     shell: true,
   });
   assert.throws(() => buildCommand('C:\\%TEMP%\\az.cmd', [], 'win32'), /unsafe/);
@@ -182,4 +182,31 @@ test('runCapture runs a tool from a directory with spaces and parentheses', asyn
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('workspace node_modules/.bin directories are never used for tools', () => {
+  assert.equal(isNodeModulesBin('/w/project/node_modules/.bin', false), true);
+  assert.equal(isNodeModulesBin('/w/project/node_modules/.bin/', false), true);
+  assert.equal(isNodeModulesBin('/w/node_modules/.bin/x', false), false);
+  assert.equal(isNodeModulesBin('/usr/local/bin', false), false);
+  assert.equal(isNodeModulesBin('C:\\w\\Node_Modules\\.BIN', true), true);
+  assert.equal(isNodeModulesBin('C:/w/node_modules/.bin', true), true);
+
+  const files = new Set(['/w/node_modules/.bin/az', '/opt/az/bin/az']);
+  const opts = { platform: /** @type {NodeJS.Platform} */ ('linux'), isFile: (/** @type {string} */ p) => files.has(p), isExecutable: () => true };
+  assert.equal(findOnPath('az', { env: { PATH: '/w/node_modules/.bin:/opt/az/bin' }, ...opts }), '/opt/az/bin/az');
+  const winFiles = new Set(['C:\\w\\node_modules\\.bin\\az.CMD', 'C:\\CLI2\\wbin\\az.CMD']);
+  assert.equal(
+    findOnPath('az', { env: { Path: 'C:\\w\\node_modules\\.bin;C:\\CLI2\\wbin', PATHEXT: '.CMD' }, platform: 'win32', isFile: (p) => winFiles.has(p) }),
+    'C:\\CLI2\\wbin\\az.CMD',
+  );
+
+  assert.deepEqual(withoutNodeModulesBins({ PATH: '/w/node_modules/.bin:/usr/bin:/x/node_modules/.bin', HOME: '/h' }, 'linux'), {
+    PATH: '/usr/bin',
+    HOME: '/h',
+  });
+  assert.deepEqual(withoutNodeModulesBins({ Path: 'C:\\w\\node_modules\\.bin;"C:\\Program Files\\x"', path: 'C:\\a' }, 'win32'), {
+    Path: '"C:\\Program Files\\x"',
+    path: 'C:\\a',
+  });
 });

@@ -10,7 +10,7 @@
  */
 
 import { checkEntraToken } from './jwt.js';
-import { findOnPath, getEnv, runCapture } from './proc.js';
+import { findOnPath, getEnv, runCapture, withoutNodeModulesBins } from './proc.js';
 import { ADO_RESOURCE_ID } from './registry.js';
 
 export const DEFAULT_TIMEOUT_MS = 10_000;
@@ -82,22 +82,37 @@ export function azArgs(tenant) {
 
 /** @param {string | undefined} tenant */
 export function azureauthArgs(tenant) {
+  // No --mode: "broker" is rejected by older releases on macOS/Linux, and where
+  // it is accepted it replaces the cached-account lookup. With
+  // AZUREAUTH_NO_USER=1 the default mode is silent: the cached account
+  // everywhere, plus Integrated Windows Auth on Windows.
   // --timeout is in minutes; our own timer enforces the real limit.
-  return ['ado', 'token', '--output', 'headervalue', '--mode', 'broker', '--timeout', '1', ...(tenant ? ['--tenant', tenant] : [])];
+  return ['ado', 'token', '--output', 'headervalue', '--timeout', '1', ...(tenant ? ['--tenant', tenant] : [])];
 }
 
 /**
- * azureauth's environment: silent only, and without the variables it would
- * read a PAT from.
+ * Environment for az: workspace `node_modules/.bin` entries removed from PATH.
  *
  * @param {NodeJS.ProcessEnv} env
+ * @param {NodeJS.Platform} [platform]
+ */
+export function azEnv(env, platform) {
+  return withoutNodeModulesBins(env, platform);
+}
+
+/**
+ * azureauth's environment: silent only, without the variables it would read
+ * a PAT from, and without workspace `node_modules/.bin` entries on PATH.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {NodeJS.Platform} [platform]
  * @returns {NodeJS.ProcessEnv}
  */
-export function azureauthEnv(env) {
+export function azureauthEnv(env, platform) {
   const blocked = new Set(AZUREAUTH_PAT_ENV.map((k) => k.toLowerCase()));
   /** @type {NodeJS.ProcessEnv} */
   const out = {};
-  for (const [k, v] of Object.entries(env)) {
+  for (const [k, v] of Object.entries(withoutNodeModulesBins(env, platform))) {
     const lower = k.toLowerCase();
     if (blocked.has(lower) || lower === 'azureauth_no_user') continue;
     out[k] = v;
@@ -164,7 +179,7 @@ export async function acquireToken(opts) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const started = now();
       debug(`running ${file} ${azArgs(tenant).join(' ')}`);
-      const r = await run(file, azArgs(tenant), { env, timeoutMs, signal });
+      const r = await run(file, azArgs(tenant), { env: azEnv(env, platform), timeoutMs, signal });
       assertNotAborted();
       let reason;
       if (r.error) reason = `failed to start: ${r.error.message}`;
@@ -200,7 +215,7 @@ export async function acquireToken(opts) {
       return undefined;
     }
     debug(`running ${file} ${azureauthArgs(tenant).join(' ')}`);
-    const r = await run(file, azureauthArgs(tenant), { env: azureauthEnv(env), timeoutMs, signal });
+    const r = await run(file, azureauthArgs(tenant), { env: azureauthEnv(env, platform), timeoutMs, signal });
     assertNotAborted();
     let reason;
     if (r.error) reason = `failed to start: ${r.error.message}`;
