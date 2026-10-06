@@ -24,6 +24,9 @@ import { descendantsOf, isAlive, npmForwardsSignals, readProcessTable, signalPid
 
 export const EXIT = Object.freeze({ INTERNAL: 1, USAGE: 2, NO_TOKEN: 3, NPM: 4 });
 
+/** A repeated signal earlier than this after the first one is treated as a duplicate. */
+const FORCE_REPEAT_MS = 1000;
+
 /**
  * @typedef {object} MainResult
  * @property {number} code  exit code to use
@@ -215,7 +218,10 @@ export async function main(argv, deps = {}) {
   const onSignal = (/** @type {NodeJS.Signals} */ sig) => {
     temp?.cleanup();
     if (received) {
-      if (child && platform !== 'win32') killTracked();
+      // The same signal often arrives twice within milliseconds (an outer npm
+      // that forwards it, a process-group kill, a terminal's Ctrl+C). Only a
+      // signal that comes clearly later means "stop now".
+      if (child && platform !== 'win32' && Date.now() - shutdownAt >= FORCE_REPEAT_MS) killTracked();
       return;
     }
     received = sig;

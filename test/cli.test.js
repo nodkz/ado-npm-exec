@@ -398,6 +398,7 @@ test('a second signal kills a server that ignores SIGTERM', { skip: isWin }, asy
     const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_SERVER_MODE: 'ignore' });
     run.child.kill('SIGTERM');
     await waitFor(() => run.events().length > 0, 3000);
+    await new Promise((r) => setTimeout(r, 1200));
     const started = Date.now();
     run.child.kill('SIGTERM');
     await run.done;
@@ -484,6 +485,25 @@ test('refuses a temp directory that other users can write to', { skip: isWin }, 
     assert.equal(r.status, 1);
     assert.match(r.stderr, /no private directory for temporary files/);
     assert.equal(fs.existsSync(s.record), false);
+  } finally {
+    s.dispose();
+  }
+});
+
+test('a duplicate signal within a second does not force-kill the server', { skip: isWin }, async () => {
+  const s = sandbox();
+  try {
+    const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_SERVER_MODE: 'ignore' });
+    // What a forwarding outer npm or a process-group kill produces.
+    run.child.kill('SIGTERM');
+    await waitFor(() => run.events().length > 0, 3000);
+    await new Promise((r) => setTimeout(r, 150));
+    run.child.kill('SIGTERM');
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(gone(run.pid), false, 'still running: no premature SIGKILL');
+    run.child.kill('SIGTERM');
+    await run.done;
+    assert.ok(await waitFor(() => gone(run.pid), 3000), 'a later signal still forces');
   } finally {
     s.dispose();
   }

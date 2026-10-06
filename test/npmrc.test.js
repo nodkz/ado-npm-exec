@@ -92,13 +92,19 @@ test('isTrustedDir: every ancestor must be owned by root or us and not writable 
 
 test('chooseBaseDir prefers the temp dir, then XDG_RUNTIME_DIR, then ~/.cache', () => {
   const entries = { ...ROOT_DIRS, '/tmp': [0, 0, 0o41777], '/run': [0, 0, 0o40755], '/run/user': [0, 0, 0o40755], '/run/user/501': [501, 20, 0o40700], '/home/u': [501, 20, 0o40755], '/home/u/.cache': [501, 20, 0o40700], '/var/t': [0, 0, 0o40755] };
-  const base = { ...ME, fs: fakeFs(entries), homedir: '/home/u', mkdir: () => {}, platform: /** @type {NodeJS.Platform} */ ('linux') };
+  const base = { ...ME, fs: fakeFs(entries), homedir: () => '/home/u', mkdir: () => {}, canWrite: () => true, platform: /** @type {NodeJS.Platform} */ ('linux') };
   assert.equal(chooseBaseDir({ ...base, tmpdir: '/var/t', env: {} }), '/var/t');
   assert.equal(chooseBaseDir({ ...base, tmpdir: '/tmp', env: { XDG_RUNTIME_DIR: '/run/user/501' } }), '/run/user/501');
   assert.equal(chooseBaseDir({ ...base, tmpdir: '/tmp', env: { XDG_RUNTIME_DIR: 'relative' } }), '/home/u/.cache');
   assert.throws(
-    () => chooseBaseDir({ ...base, tmpdir: '/tmp', env: {}, homedir: '/tmp/h', fs: fakeFs({ ...entries, '/tmp/h': [501, 20, 0o40755], '/tmp/h/.cache': [501, 20, 0o40700] }) }),
+    () => chooseBaseDir({ ...base, tmpdir: '/tmp', env: {}, homedir: () => '/tmp/h', fs: fakeFs({ ...entries, '/tmp/h': [501, 20, 0o40755], '/tmp/h/.cache': [501, 20, 0o40700] }) }),
     UnsafeTempError,
+  );
+  assert.equal(chooseBaseDir({ ...base, tmpdir: '/var/t', env: {}, canWrite: (p) => p !== '/var/t' }), '/home/u/.cache', 'a trusted but read-only dir is skipped');
+  assert.throws(
+    () => chooseBaseDir({ ...base, tmpdir: '/tmp', env: {}, homedir: () => { throw new Error('no home'); } }),
+    UnsafeTempError,
+    'no home directory is not a crash',
   );
   assert.equal(chooseBaseDir({ ...base, platform: 'win32', tmpdir: 'C:\\Users\\u\\AppData\\Local\\Temp', env: {} }), 'C:\\Users\\u\\AppData\\Local\\Temp');
 });

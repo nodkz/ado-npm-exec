@@ -83,7 +83,7 @@ export function isTrustedDir(dir, { uid, gid, fs: f = realFs }) {
     if (st.uid !== 0 && st.uid !== uid) return false;
     if (st.mode & 0o002) return false;
     if (st.mode & 0o020 && st.gid !== gid) return false;
-    const parent = path.dirname(current);
+    const parent = path.posix.dirname(current);
     if (parent === current) return true;
     current = parent;
   }
@@ -91,27 +91,43 @@ export function isTrustedDir(dir, { uid, gid, fs: f = realFs }) {
 
 /**
  * Where to create the temp directory. Windows uses the per-user %TEMP%. On
- * POSIX the first trusted candidate wins: the OS temp dir (per-user on
- * macOS), $XDG_RUNTIME_DIR, then ~/.cache (created 0700 if missing).
+ * POSIX the first candidate that is trusted (see isTrustedDir) and writable
+ * by us wins: the OS temp dir (per-user on macOS), $XDG_RUNTIME_DIR, then
+ * ~/.cache (created 0700 if missing).
  *
  * @param {{ platform?: NodeJS.Platform, tmpdir?: string, env?: NodeJS.ProcessEnv,
- *   homedir?: string, uid?: number, gid?: number, fs?: FsLike,
- *   mkdir?: (p: string) => void }} [opts]
+ *   homedir?: () => string, uid?: number, gid?: number, fs?: FsLike,
+ *   mkdir?: (p: string) => void, canWrite?: (p: string) => boolean }} [opts]
  * @returns {string}
  */
 export function chooseBaseDir({
   platform = process.platform,
   tmpdir = os.tmpdir(),
   env = process.env,
-  homedir = os.homedir(),
+  homedir = () => os.homedir(),
   uid = process.getuid?.() ?? -1,
   gid = process.getgid?.() ?? -1,
   fs: f = realFs,
   mkdir = (p) => fs.mkdirSync(p, { recursive: true, mode: 0o700 }),
+  canWrite = (p) => {
+    try {
+      fs.accessSync(p, fs.constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  },
 } = {}) {
   if (platform === 'win32') return tmpdir;
-  const cache = path.join(homedir, '.cache');
-  const candidates = [tmpdir, env.XDG_RUNTIME_DIR, cache].filter((c) => typeof c === 'string' && path.isAbsolute(c));
+  const p = path.posix;
+  /** @type {string | undefined} */
+  let cache;
+  try {
+    cache = p.join(homedir(), '.cache');
+  } catch {
+    // no home directory (e.g. HOME unset and no passwd entry)
+  }
+  const candidates = [tmpdir, env.XDG_RUNTIME_DIR, cache].filter((c) => typeof c === 'string' && p.isAbsolute(c));
   for (const dir of /** @type {string[]} */ (candidates)) {
     if (dir === cache) {
       try {
@@ -120,11 +136,11 @@ export function chooseBaseDir({
         continue;
       }
     }
-    if (isTrustedDir(dir, { uid, gid, fs: f })) return dir;
+    if (isTrustedDir(dir, { uid, gid, fs: f }) && canWrite(dir)) return dir;
   }
   throw new UnsafeTempError(
-    `no private directory for temporary files: ${candidates.join(', ')} (or a parent) can be written by other users. ` +
-      'Set TMPDIR to a directory only you can write to.',
+    `no private directory for temporary files: ${candidates.join(', ')} (or a parent) can be written by other users, ` +
+      'or not by you. Set TMPDIR to a directory only you can write to.',
   );
 }
 
