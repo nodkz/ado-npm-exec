@@ -106,7 +106,7 @@ sequenceDiagram
          "type": "stdio",
          "command": "npm",
          "args": [
-           "exec", "-y", "--prefix=~/", "--registry=https://registry.npmjs.org/",
+           "exec", "-y", "--prefix=~/", "--registry=https://packagefeedproxy.microsoft.io/npm/",
            "--", "ado-npm-exec@0.1.0",
            "--registry", "https://pkgs.dev.azure.com/<org>/_packaging/<feed>/npm/registry/",
            "--", "@contoso/my-mcp@latest", "--some-server-flag"
@@ -125,7 +125,7 @@ sequenceDiagram
          "type": "local",
          "command": "npm",
          "args": [
-           "exec", "-y", "--prefix=~/", "--registry=https://registry.npmjs.org/",
+           "exec", "-y", "--prefix=~/", "--registry=https://packagefeedproxy.microsoft.io/npm/",
            "--", "ado-npm-exec@0.1.0",
            "--registry", "https://pkgs.dev.azure.com/<org>/_packaging/<feed>/npm/registry/",
            "--", "@contoso/my-mcp@latest"
@@ -142,8 +142,8 @@ What the outer arguments do:
 | --- | --- |
 | `exec -y` | Fetch and run `ado-npm-exec` without prompting. |
 | `--prefix=~/` | Makes your home directory npm's project root for this one command. Without it, an `ado-npm-exec` copy in the workspace's `node_modules` could be run instead of the published package, and the workspace's `.npmrc` would apply. npm expands `~/` itself. |
-| `--registry=https://registry.npmjs.org/` | `ado-npm-exec` lives on the public registry, whatever your default registry is. |
-| `ado-npm-exec@<exact version>` | Pinned. Never `@latest` for a tool that handles your tokens. |
+| `--registry=https://packagefeedproxy.microsoft.io/npm/` | `ado-npm-exec` is a public npm package. This fetches it through Microsoft's public npm proxy, which needs no credentials and also works on Microsoft-managed devices, where `registry.npmjs.org` is blocked. On other machines `--registry=https://registry.npmjs.org/` works too. |
+| `ado-npm-exec@<exact version>` | Pinned. Never `@latest` for a tool that handles your tokens. The proxy holds newly published versions for 7 days, so pin a version that has been out for at least a week. |
 
 Everything after `ado-npm-exec@…` is for `ado-npm-exec` itself: the feed URL,
 then the package spec and the arguments for that package.
@@ -313,7 +313,7 @@ Run the same command in a terminal with `--verbose` (or set
 `ADO_NPM_EXEC_VERBOSE=1` in the MCP config's `env`):
 
 ```sh
-npm exec -y --registry=https://registry.npmjs.org/ -- ado-npm-exec@0.1.0 --verbose \
+npm exec -y --registry=https://packagefeedproxy.microsoft.io/npm/ -- ado-npm-exec@0.1.0 --verbose \
   --registry https://pkgs.dev.azure.com/contoso/_packaging/feed/npm/registry/ \
   -- @contoso/my-mcp@latest --version
 ```
@@ -369,7 +369,9 @@ no npm token is stored in the repository.
    reviewers.
 4. Bump `version` in `package.json`, merge, and publish a GitHub release tagged
    `v<version>`. The workflow checks that the tag matches, runs the tests, and
-   publishes with `--provenance`.
+   publishes with `--provenance`. The new version reaches users of
+   `packagefeedproxy.microsoft.io` only after its 7-day hold, so update pinned
+   versions in configs after that.
 
 ## License
 
