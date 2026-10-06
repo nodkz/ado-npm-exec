@@ -1,6 +1,6 @@
 {
   "name": "ado-npm-exec",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Run a package from a private Azure DevOps (Azure Artifacts) npm feed with silent Microsoft Entra ID auth. Zero dependencies. Built for MCP stdio server configs.",
   "keywords": [
     "azure-devops",

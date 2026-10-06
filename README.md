@@ -42,9 +42,7 @@ flowchart TB
     az -- "existing login session" --> entra
     ane -- "3) runs with a temp .npmrc" --> inner
     inner -- "4) Bearer token:<br/>fetch @contoso/my-mcp" --> feed
-    feed -. "public dependencies<br/>via its upstream" .-> npmjs
     inner -- runs --> server
-    client <-. "5) JSON-RPC over stdin/stdout" .-> server
 ```
 
 Step by step:
@@ -54,34 +52,26 @@ sequenceDiagram
     autonumber
     participant Client as MCP client
     participant Outer as npm exec (outer)
-    participant NPMJS as packagefeedproxy.microsoft.io/npm/
+    participant NPMJS as Public NPM registry
     participant ANE as ado-npm-exec
     participant AZ as az / azureauth
     participant Inner as npm exec (inner)
-    participant Feed as Azure Artifacts feed
+    participant Feed as Private NPM registry
     participant Server as MCP server
 
-    Client->>Outer: npm exec --registry=<proxy> -- ado-npm-exec@<pinned> --registry <feed> -- @contoso/my-mcp
-    Outer->>NPMJS: GET ado-npm-exec@<pinned> (anonymous)
-    NPMJS-->>Outer: tarball (zero dependencies, with provenance)
-    Outer->>ANE: start (its env points npm at the proxy)
-    Note over ANE: check the feed URL against the allowlist
-    alt ADO_NPM_EXEC_TOKEN is set
-        Note over ANE: use it (must be an Entra ID JWT)
-    else
-        ANE->>Feed: anonymous GET (no credentials, no redirects)
-        Feed-->>ANE: 401 + tenant id
-        ANE->>AZ: az account get-access-token --tenant <id><br/>(then azureauth, silent only)
-        AZ-->>ANE: Entra ID access token (JWT)
-    end
-    Note over ANE: check audience, expiry, tenant<br/>write the token to a private temp .npmrc (0600)<br/>drop inherited npm settings that point at the proxy
-    ANE->>Inner: node npm-cli.js exec --prefix=<temp> --registry=<feed> -- @contoso/my-mcp
-    Inner->>Feed: GET package + tarballs (Authorization: Bearer)
-    Feed-->>Inner: @contoso/my-mcp and its dependencies
-    Inner->>Server: start the package's bin
+    Client->>Outer: npm exec ado-npm-exec@<pinned> <feed> @contoso/my-mcp
+    Outer->>NPMJS: get ado-npm-exec
+    NPMJS-->>Outer: ado-npm-exec
+    Outer->>ANE: run
+    ANE->>AZ: silent token request
+    AZ-->>ANE: Entra ID access token
+    ANE->>Inner: npm exec --registry=<feed> @contoso/my-mcp
+    Inner->>Feed: get @contoso/my-mcp (Bearer token)
+    Feed-->>Inner: @contoso/my-mcp
+    Inner->>Server: start
     Client->>Server: JSON-RPC request (stdin)
     Server-->>Client: JSON-RPC response (stdout)
-    Note over ANE: on exit or the first signal: delete the temp .npmrc,<br/>forward the signal, pass the exit code back
+    Note over ANE: on exit: delete the temp .npmrc
 ```
 
 ## Quick start
