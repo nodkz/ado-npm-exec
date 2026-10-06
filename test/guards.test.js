@@ -16,7 +16,7 @@ const ZERO_GUID = '00000000-0000-0000-0000-000000000000';
 /** @param {string} dir @returns {string[]} */
 function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    if (e.name === 'node_modules' || e.name === '.git') return [];
+    if (e.name === 'node_modules' || e.name === '.git' || e.name === '.tmp-test') return [];
     const p = path.join(dir, e.name);
     return e.isDirectory() ? walk(p) : [p];
   });

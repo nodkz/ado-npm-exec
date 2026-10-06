@@ -3,3 +3,4 @@ node_modules/
 .DS_Store
 # Never commit npm config: it can carry registry credentials or internal URLs.
 .npmrc
+.tmp-test/

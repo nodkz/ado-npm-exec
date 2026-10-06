@@ -1,7 +1,9 @@
 // Fake npm-cli.js: records what ado-npm-exec handed to "npm", then behaves
 // as instructed by FAKE_NPM_* variables. Used via npm_execpath in tests.
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const recordFile = /** @type {string} */ (process.env.FAKE_NPM_RECORD);
 const rc = process.env.npm_config_userconfig;
@@ -27,6 +29,23 @@ if (process.env.FAKE_NPM_STDOUT) process.stdout.write(process.env.FAKE_NPM_STDOU
 
 if (process.env.FAKE_NPM_KILL_SELF) {
   process.kill(process.pid, 'SIGKILL');
+} else if (process.env.FAKE_NPM_SERVER_PID) {
+  // Like npm running a bin: the server (optionally behind a launcher) is a
+  // child of this process. FAKE_NPM_IGNORE_SIGNALS mimics npm 10, which traps
+  // SIGINT/SIGTERM without forwarding them.
+  if (process.env.FAKE_NPM_IGNORE_SIGNALS) {
+    for (const sig of /** @type {NodeJS.Signals[]} */ (['SIGTERM', 'SIGINT'])) {
+      process.on(sig, () => {
+        record.npmSignals = [...(/** @type {string[]} */ (record.npmSignals ?? [])), sig];
+        save();
+      });
+    }
+  }
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  const server = [path.join(dir, '..', 'fake-server.js'), process.env.FAKE_NPM_SERVER_PID, /** @type {string} */ (process.env.FAKE_NPM_SERVER_EVENTS), process.env.FAKE_NPM_SERVER_MODE ?? ''];
+  const args = process.env.FAKE_NPM_LAUNCHER ? [path.join(dir, '..', 'fake-launcher.js'), ...server] : server;
+  const child = spawn(process.execPath, args, { stdio: 'inherit' });
+  child.on('exit', (code, signal) => process.exit(signal ? 143 : (code ?? 0)));
 } else if (process.env.FAKE_NPM_READ_STDIN) {
   /** @type {Buffer[]} */
   const chunks = [];

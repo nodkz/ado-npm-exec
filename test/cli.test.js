@@ -2,13 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FORCED_NPM_FLAGS } from '../src/run.js';
 import { renderNpmrc } from '../src/npmrc.js';
 import { validateRegistryUrl } from '../src/registry.js';
 import { validJwt, TENANT } from '../fixtures/jwt.js';
+import { makeTestRoot } from '../fixtures/sandbox.js';
 
 const BIN = fileURLToPath(new URL('../bin/ado-npm-exec.js', import.meta.url));
 const FAKE_NPM = fileURLToPath(new URL('../fixtures/fake-npm/npm-cli.js', import.meta.url));
@@ -17,7 +17,7 @@ const isWin = process.platform === 'win32';
 const pkgVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 function sandbox() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-npm-exec-test-'));
+  const root = makeTestRoot('cli-');
   const tmp = path.join(root, 'tmp');
   const home = path.join(root, 'home');
   fs.mkdirSync(tmp);
@@ -327,6 +327,163 @@ test('a signal during token acquisition kills the provider and exits', { skip: i
     assert.ok(gone, 'az was killed');
     assert.equal(fs.existsSync(s.record), false);
     assert.deepEqual(s.leftovers(), []);
+  } finally {
+    s.dispose();
+  }
+});
+
+/**
+ * Start the bin with a fake npm that runs a fake server (optionally behind a
+ * launcher) and wait until the server is up.
+ *
+ * @param {ReturnType<typeof sandbox>} s
+ * @param {NodeJS.ProcessEnv} extra
+ */
+async function startWithServer(s, extra) {
+  const serverPid = path.join(s.root, 'server.pid');
+  const events = path.join(s.root, 'server.events');
+  fs.writeFileSync(events, '');
+  const child = spawn(process.execPath, [BIN, FEED, 'tool'], {
+    env: { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_SERVER_PID: serverPid, FAKE_NPM_SERVER_EVENTS: events, ...extra },
+    stdio: 'ignore',
+  });
+  assert.ok(await waitFor(() => fs.existsSync(serverPid) && fs.readFileSync(serverPid, 'utf8') !== '', 20_000), 'server started');
+  const pid = Number(fs.readFileSync(serverPid, 'utf8'));
+  return { child, pid, events: () => fs.readFileSync(events, 'utf8').split('\n').filter(Boolean), done: exited(child) };
+}
+
+/** @param {number} pid */
+function gone(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+test('SIGTERM reaches the server even when npm ignores it (npm 10)', { skip: isWin }, async () => {
+  const s = sandbox();
+  try {
+    const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1' });
+    const started = Date.now();
+    run.child.kill('SIGTERM');
+    await run.done;
+    assert.ok(Date.now() - started < 3000, 'no need to wait for the SIGKILL deadline');
+    assert.deepEqual(run.events(), ['SIGTERM'], 'the server got exactly one SIGTERM');
+    assert.ok(await waitFor(() => gone(run.pid), 3000), 'server stopped');
+    assert.deepEqual(s.read().npmSignals, ['SIGTERM']);
+    assert.deepEqual(s.leftovers(), []);
+  } finally {
+    s.dispose();
+  }
+});
+
+test('SIGTERM reaches a server started by a launcher that does not forward it', { skip: isWin }, async () => {
+  const s = sandbox();
+  try {
+    const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_LAUNCHER: '1' });
+    run.child.kill('SIGTERM');
+    await run.done;
+    assert.deepEqual(run.events(), ['SIGTERM']);
+    assert.ok(await waitFor(() => gone(run.pid), 3000), 'server stopped');
+  } finally {
+    s.dispose();
+  }
+});
+
+test('a second signal kills a server that ignores SIGTERM', { skip: isWin }, async () => {
+  const s = sandbox();
+  try {
+    const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_SERVER_MODE: 'ignore' });
+    run.child.kill('SIGTERM');
+    await waitFor(() => run.events().length > 0, 3000);
+    const started = Date.now();
+    run.child.kill('SIGTERM');
+    await run.done;
+    assert.ok(Date.now() - started < 2000);
+    assert.ok(await waitFor(() => gone(run.pid), 3000), 'server killed');
+    assert.deepEqual(s.leftovers(), []);
+  } finally {
+    s.dispose();
+  }
+});
+
+test('a server that ignores SIGTERM is killed after 5 seconds', { skip: isWin }, async () => {
+  const s = sandbox();
+  try {
+    const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_SERVER_MODE: 'ignore' });
+    const started = Date.now();
+    run.child.kill('SIGTERM');
+    await run.done;
+    const took = Date.now() - started;
+    assert.ok(took >= 4500 && took < 9000, `took ${took} ms`);
+    assert.ok(await waitFor(() => gone(run.pid), 3000), 'server killed');
+  } finally {
+    s.dispose();
+  }
+});
+
+test('when the parent dies without signalling, the tree is stopped and the token removed', { skip: isWin }, async () => {
+  const s = sandbox();
+  try {
+    const ready = path.join(s.root, 'ready');
+    const binPidFile = path.join(s.root, 'bin.pid');
+    // A parent like `npm exec` killed with SIGKILL by an MCP client.
+    const parent = spawn(
+      process.execPath,
+      [
+        '-e',
+        `const c = require('child_process').spawn(process.execPath, ${JSON.stringify([BIN, FEED, 'tool'])}, { stdio: 'ignore' });
+         require('fs').writeFileSync(${JSON.stringify(binPidFile)}, String(c.pid));
+         setInterval(() => {}, 1000);`,
+      ],
+      { env: { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_WAIT: ready }, stdio: 'ignore' },
+    );
+    assert.ok(await waitFor(() => fs.existsSync(ready), 20_000), 'fake npm started');
+    const binPid = Number(fs.readFileSync(binPidFile, 'utf8'));
+    parent.kill('SIGKILL');
+    assert.ok(await waitFor(() => gone(binPid), 8000), 'ado-npm-exec exited after its parent died');
+    const rec = s.read();
+    assert.equal(rec.gotSignal, 'SIGTERM');
+    assert.equal(rec.npmrcExistsAtSignal, false);
+    assert.deepEqual(s.leftovers(), []);
+  } finally {
+    s.dispose();
+  }
+});
+
+test('refuses to run when a file would shadow the package from the feed', () => {
+  const s = sandbox();
+  try {
+    // npm would run <ancestor of the temp dir>/node_modules/.bin/<spec> instead.
+    const bin = path.join(s.root, 'tmp', 'node_modules', '.bin');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'tool@1.0.0'), '#!/bin/sh\necho planted\n', { mode: 0o755 });
+    const r = runBin([FEED, 'tool@1.0.0'], { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt() });
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr, /refusing to run: npm would execute .*tool@1\.0\.0/);
+    assert.equal(fs.existsSync(s.record), false, 'npm did not run');
+    assert.deepEqual(s.leftovers(), []);
+  } finally {
+    s.dispose();
+  }
+});
+
+test('refuses a temp directory that other users can write to', { skip: isWin }, () => {
+  const s = sandbox();
+  try {
+    const shared = path.join(s.root, 'shared');
+    fs.mkdirSync(shared);
+    fs.chmodSync(shared, 0o1777);
+    // HOME is also inside the shared directory, so ~/.cache is not an option either.
+    const home = path.join(shared, 'home');
+    fs.mkdirSync(home);
+    const r = runBin([FEED, 'tool'], { ...s.env, TMPDIR: shared, HOME: home, XDG_RUNTIME_DIR: '', ADO_NPM_EXEC_TOKEN: validJwt() });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /no private directory for temporary files/);
+    assert.equal(fs.existsSync(s.record), false);
   } finally {
     s.dispose();
   }

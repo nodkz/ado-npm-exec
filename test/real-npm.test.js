@@ -10,11 +10,11 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveNpm } from '../src/npm-cli.js';
 import { validJwt } from '../fixtures/jwt.js';
+import { makeTestRoot } from '../fixtures/sandbox.js';
 
 const RUN_MAIN = fileURLToPath(new URL('../fixtures/run-main.js', import.meta.url));
 const FIXTURE_PKG = fileURLToPath(new URL('../fixtures/hello-mcp/', import.meta.url));
@@ -73,7 +73,7 @@ function cleanEnv(extra) {
 
 before(async () => {
   if (!npm) return;
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'ado-npm-exec-test-'));
+  root = makeTestRoot('real-npm-');
   for (const d of ['tmp', 'home', 'cache', 'pkg']) fs.mkdirSync(path.join(root, d));
   fs.writeFileSync(path.join(root, 'global.npmrc'), '');
   fs.writeFileSync(path.join(root, 'empty.npmrc'), '');

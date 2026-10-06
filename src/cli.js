@@ -9,16 +9,18 @@
 
 import fs from 'node:fs';
 import os from 'node:os';
+import tty from 'node:tty';
 import { parseArgs, UsageError, USAGE } from './args.js';
 import { buildInnerEnv } from './env.js';
 import { addSecret, createLogger } from './log.js';
 import { resolveNpm } from './npm-cli.js';
-import { createTempNpmrc, renderNpmrc } from './npmrc.js';
-import { getEnv } from './proc.js';
+import { chooseBaseDir, createTempNpmrc, findShadowingBin, renderNpmrc, sweepStaleTempDirs, UnsafeTempError } from './npmrc.js';
+import { getEnv, killProcessTree } from './proc.js';
 import { parseSpec, RegistryError, SpecError, validateRegistryUrl } from './registry.js';
 import { buildNpmArgv, spawnNpm, waitForExit } from './run.js';
 import { discoverTenant, isGuid } from './tenant.js';
 import { acquireToken, AbortedError, DEFAULT_TIMEOUT_MS, TokenError } from './tokens.js';
+import { descendantsOf, isAlive, npmForwardsSignals, readProcessTable, signalPid } from './tree.js';
 
 export const EXIT = Object.freeze({ INTERNAL: 1, USAGE: 2, NO_TOKEN: 3, NPM: 4 });
 
@@ -39,8 +41,11 @@ export const EXIT = Object.freeze({ INTERNAL: 1, USAGE: 2, NO_TOKEN: 3, NPM: 4 }
  * @property {typeof acquireToken} [acquire]
  * @property {typeof resolveNpm} [findNpm]
  * @property {typeof spawnNpm} [spawn]
- * @property {string} [tmpdir]
+ * @property {string} [tmpdir]  base directory for the temp npmrc (default: a trusted one, see chooseBaseDir)
  * @property {Pick<NodeJS.Process, 'on' | 'off'>} [signals]
+ * @property {number} [parentWatchMs]  how often to check whether our parent exited (0 disables)
+ * @property {number} [stageMs]  after a signal, when to signal processes npm did not forward it to
+ * @property {number} [killAfterMs]  after a signal, when to SIGKILL whatever is left
  */
 
 /** @param {NodeJS.Signals} signal */
@@ -78,8 +83,11 @@ export async function main(argv, deps = {}) {
     acquire = acquireToken,
     findNpm = resolveNpm,
     spawn = spawnNpm,
-    tmpdir = os.tmpdir(),
+    tmpdir,
     signals = process,
+    parentWatchMs = 1000,
+    stageMs = 1000,
+    killAfterMs = 5000,
   } = deps;
 
   /** @type {import('./args.js').ParsedArgs} */
@@ -126,38 +134,121 @@ export async function main(argv, deps = {}) {
     tenant = undefined;
   }
 
-  // One signal handler for the whole run. Before npm starts it cancels token
-  // acquisition; afterwards it removes the token file first (the client may
-  // follow up with SIGKILL) and then forwards the signal to npm.
+  // Fail fast, before the slow token acquisition, on anything local.
+  const npm = findNpm({ env, platform });
+  if (!npm) {
+    log.error("could not locate npm's npm-cli.js; make sure npm is installed with Node.js.");
+    return { code: EXIT.NPM };
+  }
+  /** @type {string} */
+  let baseDir;
+  try {
+    baseDir = tmpdir ?? chooseBaseDir({ platform, env });
+  } catch (error) {
+    if (!(error instanceof UnsafeTempError)) throw error;
+    log.error(error.message);
+    return { code: EXIT.INTERNAL };
+  }
+  const swept = sweepStaleTempDirs(baseDir);
+  if (swept > 0) log.debug(`removed ${swept} stale temp director${swept === 1 ? 'y' : 'ies'} from ${baseDir}`);
+
+  // Shutdown. Before npm starts, a signal cancels token acquisition. After,
+  // the token file is removed first (the client may follow up with SIGKILL),
+  // then npm's process tree is stopped in stages:
+  //   1. npm, plus its direct children when this npm does not forward signals
+  //      (npm 10.2 traps SIGINT/SIGTERM and ignores them);
+  //   2. after stageMs, any other process of the tree that is still running
+  //      (launchers that do not forward, install scripts);
+  //   3. after killAfterMs, SIGKILL for whatever is left. A second signal
+  //      does this immediately.
+  // If our parent exits (an MCP client killed `npm exec` and npm did not
+  // forward the signal), the same shutdown runs.
   const abort = new AbortController();
+  const forwards = npmForwardsSignals(npm.cli);
   /** @type {import('./npmrc.js').TempNpmrc | undefined} */
   let temp;
   /** @type {import('node:child_process').ChildProcess | undefined} */
   let child;
   /** @type {NodeJS.Signals | undefined} */
   let received;
+  let shutdownAt = 0;
+  /** @type {Set<number>} */
+  const tracked = new Set();
+  /** @type {NodeJS.Timeout[]} */
+  const timers = [];
+
+  const snapshot = () => {
+    const pid = child?.pid;
+    if (pid === undefined) return { direct: /** @type {number[]} */ ([]), all: /** @type {number[]} */ ([]) };
+    const tree = descendantsOf(pid, readProcessTable(platform));
+    tracked.add(pid);
+    for (const p of tree.all) tracked.add(p);
+    return tree;
+  };
+  const killTracked = () => {
+    snapshot();
+    for (const pid of tracked) if (isAlive(pid)) signalPid(pid, 'SIGKILL');
+  };
+  const stopChild = (/** @type {NodeJS.Signals} */ sig, /** @type {boolean} */ alreadyDelivered) => {
+    const pid = child?.pid;
+    if (pid === undefined) return;
+    if (platform === 'win32') {
+      // No POSIX signals: Ctrl+C reaches npm through the console window, and
+      // only a vanished parent needs the tree killed (see the watchdog).
+      return;
+    }
+    const term = sig === 'SIGHUP' ? 'SIGTERM' : sig;
+    const tree = snapshot();
+    const firstWave = new Set([pid, ...tree.direct]);
+    if (!alreadyDelivered) {
+      if (child?.exitCode === null && child.signalCode === null) signalPid(pid, term);
+      if (!forwards) for (const p of tree.direct) signalPid(p, term);
+    }
+    timers.push(
+      setTimeout(() => {
+        snapshot();
+        for (const p of tracked) if (!firstWave.has(p) && isAlive(p)) signalPid(p, term);
+      }, stageMs),
+      setTimeout(killTracked, killAfterMs),
+    );
+  };
   const onSignal = (/** @type {NodeJS.Signals} */ sig) => {
-    received ??= sig;
     temp?.cleanup();
+    if (received) {
+      if (child && platform !== 'win32') killTracked();
+      return;
+    }
+    received = sig;
+    shutdownAt = Date.now();
     if (!child) {
       abort.abort();
       return;
     }
-    // On Windows the console already delivered Ctrl+C to npm, and killing it
-    // would orphan the server instead of letting it shut down.
-    if (platform !== 'win32' && child.exitCode === null && child.signalCode === null) {
-      try {
-        child.kill(sig === 'SIGHUP' ? 'SIGTERM' : sig); // npm forwards only SIGINT/SIGTERM
-      } catch {
-        // already gone
-      }
-    }
+    // A terminal's Ctrl+C has already reached every process in our group.
+    stopChild(sig, sig === 'SIGINT' && tty.isatty(0));
   };
   /** @type {NodeJS.Signals[]} */
-  const handled = platform === 'win32' ? ['SIGINT', 'SIGBREAK', 'SIGTERM'] : ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  const handled = platform === 'win32' ? ['SIGINT', 'SIGBREAK', 'SIGTERM', 'SIGHUP'] : ['SIGINT', 'SIGTERM', 'SIGHUP'];
   for (const s of handled) signals.on(s, onSignal);
   const exitHook = () => temp?.cleanup();
   process.on('exit', exitHook);
+
+  const parentPid = process.ppid;
+  const watchdog =
+    parentWatchMs > 0 && parentPid > 1
+      ? setInterval(() => {
+          const gone = platform === 'win32' ? !isAlive(parentPid) : process.ppid !== parentPid;
+          if (!gone) return;
+          clearInterval(watchdog);
+          log.debug('the parent process exited; shutting down');
+          if (platform !== 'win32') return onSignal('SIGTERM');
+          temp?.cleanup();
+          received ??= 'SIGTERM';
+          if (child) killProcessTree(child, platform, env);
+          else abort.abort();
+        }, parentWatchMs)
+      : undefined;
+  watchdog?.unref();
 
   try {
     log.debug(`feed ${registry.href}, package ${spec.raw}`);
@@ -200,17 +291,19 @@ export async function main(argv, deps = {}) {
     const exp = typeof acquired.claims.exp === 'number' ? Math.round((acquired.claims.exp * 1000 - Date.now()) / 60000) : '?';
     log.debug(`token from ${acquired.source} (tenant ${acquired.claims.tid ?? 'unknown'}, expires in ${exp} min)`);
 
-    const npm = findNpm({ env, platform });
-    if (!npm) {
-      log.error("could not locate npm's npm-cli.js; make sure npm is installed with Node.js.");
-      return { code: EXIT.NPM };
-    }
-
-    temp = createTempNpmrc(renderNpmrc({ registry, token: acquired.token, scope: spec.scope }), { tmpdir });
+    temp = createTempNpmrc(renderNpmrc({ registry, token: acquired.token, scope: spec.scope }), { tmpdir: baseDir });
     if (received) return { code: signalExitCode(received), signal: received };
 
+    // npm runs `<dir>/node_modules/.bin/<spec>` from the temp dir or any parent
+    // directory instead of fetching the package, if such a file exists.
+    const shadow = findShadowingBin(temp.dir, spec.raw);
+    if (shadow) {
+      log.error(`refusing to run: npm would execute ${shadow} instead of ${spec.raw} from the feed. Remove that file.`);
+      return { code: EXIT.INTERNAL };
+    }
+
     const argvForNpm = buildNpmArgv({ cli: npm.cli, prefixDir: temp.dir, registryHref: registry.href, spec: spec.raw, args: parsed.args });
-    const innerEnv = buildInnerEnv(env, { npmrcFile: temp.file, registryHost: registry.host, scope: spec.scope, platform });
+    const innerEnv = buildInnerEnv(env, { npmrcFile: temp.file, registryHost: registry.host, scope: spec.scope, platform, execPath: npm.node });
     log.debug(`running ${npm.node} ${argvForNpm.join(' ')}`);
 
     let result;
@@ -222,6 +315,13 @@ export async function main(argv, deps = {}) {
       return { code: EXIT.NPM };
     }
     log.debug(`npm exited with ${result.signal ?? result.code}`);
+    if (received && platform !== 'win32') {
+      // Give the rest of the tree until the SIGKILL deadline to exit.
+      const deadline = shutdownAt + killAfterMs + 250;
+      while (Date.now() < deadline && [...tracked].some((p) => p !== child?.pid && isAlive(p))) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
     if (result.signal) return { code: signalExitCode(result.signal), signal: result.signal };
     return { code: result.code ?? EXIT.INTERNAL };
   } catch (error) {
@@ -229,6 +329,8 @@ export async function main(argv, deps = {}) {
     return { code: EXIT.INTERNAL };
   } finally {
     if (temp && !temp.cleanup()) log.error(`could not remove ${temp.dir}; delete it manually`);
+    for (const t of timers) clearTimeout(t);
+    if (watchdog) clearInterval(watchdog);
     for (const s of handled) signals.off(s, onSignal);
     process.off('exit', exitHook);
   }
