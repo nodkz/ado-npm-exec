@@ -17,7 +17,8 @@ prompt:
 
 ## How it works
 
-`ado-npm-exec` itself comes anonymously from the public npm registry. Your
+`ado-npm-exec` itself comes anonymously from the public npm proxy
+`https://packagefeedproxy.microsoft.io/npm/`. Your
 package comes from the private feed, with a Microsoft Entra ID token that is
 only ever sent to that feed. The inner npm talks to the feed alone; public
 dependencies reach it through the feed's upstream sources.
@@ -30,7 +31,7 @@ flowchart TB
     az["az / azureauth"]
     inner["npm exec (inner)"]
     server["MCP server<br/>@contoso/my-mcp"]
-    npmjs[("registry.npmjs.org<br/>public")]
+    npmjs[("packagefeedproxy.microsoft.io/npm/<br/>public")]
     entra["Microsoft Entra ID"]
     feed[("Azure Artifacts feed<br/>private")]
 
@@ -53,17 +54,17 @@ sequenceDiagram
     autonumber
     participant Client as MCP client
     participant Outer as npm exec (outer)
-    participant NPMJS as registry.npmjs.org
+    participant NPMJS as packagefeedproxy.microsoft.io/npm/
     participant ANE as ado-npm-exec
     participant AZ as az / azureauth
     participant Inner as npm exec (inner)
     participant Feed as Azure Artifacts feed
     participant Server as MCP server
 
-    Client->>Outer: npm exec --registry=npmjs -- ado-npm-exec@<pinned> --registry <feed> -- @contoso/my-mcp
+    Client->>Outer: npm exec --registry=<proxy> -- ado-npm-exec@<pinned> --registry <feed> -- @contoso/my-mcp
     Outer->>NPMJS: GET ado-npm-exec@<pinned> (anonymous)
     NPMJS-->>Outer: tarball (zero dependencies, with provenance)
-    Outer->>ANE: start (its env points npm at npmjs)
+    Outer->>ANE: start (its env points npm at the proxy)
     Note over ANE: check the feed URL against the allowlist
     alt ADO_NPM_EXEC_TOKEN is set
         Note over ANE: use it (must be an Entra ID JWT)
@@ -73,7 +74,7 @@ sequenceDiagram
         ANE->>AZ: az account get-access-token --tenant <id><br/>(then azureauth, silent only)
         AZ-->>ANE: Entra ID access token (JWT)
     end
-    Note over ANE: check audience, expiry, tenant<br/>write the token to a private temp .npmrc (0600)<br/>drop inherited npm settings that point at npmjs
+    Note over ANE: check audience, expiry, tenant<br/>write the token to a private temp .npmrc (0600)<br/>drop inherited npm settings that point at the proxy
     ANE->>Inner: node npm-cli.js exec --prefix=<temp> --registry=<feed> -- @contoso/my-mcp
     Inner->>Feed: GET package + tarballs (Authorization: Bearer)
     Feed-->>Inner: @contoso/my-mcp and its dependencies
