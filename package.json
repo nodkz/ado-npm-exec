@@ -13,6 +13,7 @@
     "auth"
   ],
   "license": "MIT",
+  "author": "Pavel Chertorogov <pavel.chertorogov@gmail.com>",
   "type": "module",
   "bin": {
     "ado-npm-exec": "bin/ado-npm-exec.js"

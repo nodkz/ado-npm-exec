@@ -37,6 +37,8 @@ test('the bootstrapper never touches stdout or stdin (they belong to the MCP ser
 });
 
 test('shipped files contain no tenant IDs, internal URLs or e-mail addresses', () => {
+  // The package author's public contact address (package.json "author") is the only one allowed.
+  const authorEmail = /<([^>]+)>/.exec(pkg.author ?? '')?.[1]?.toLowerCase();
   for (const file of shippedFiles()) {
     const rel = path.relative(ROOT, file);
     const text = fs.readFileSync(file, 'utf8');
@@ -55,6 +57,7 @@ test('shipped files contain no tenant IDs, internal URLs or e-mail addresses', (
       }
     }
     for (const email of text.match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io)\b/gi) ?? []) {
+      if (email.toLowerCase() === authorEmail) continue;
       assert.ok(/@(contoso\.com|users\.noreply\.github\.com)$/i.test(email), `${rel}: e-mail address ${email}`);
     }
   }
