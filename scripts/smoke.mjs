@@ -12,11 +12,12 @@
 // line on stdout. SMOKE_TIMEOUT_MS (default 180000) bounds the whole run.
 //
 // Passes when: the run succeeds, stdout holds only the package's own output,
-// and no ado-npm-exec-* temp directory is left behind.
+// and no ado-npm-exec-* temp directory is left behind (in the folder the
+// tool itself picks for them).
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { chooseBaseDir } from '../src/npmrc.js';
 
 const BIN = fileURLToPath(new URL('../bin/ado-npm-exec.js', import.meta.url));
 const registry = process.env.SMOKE_REGISTRY;
@@ -30,7 +31,8 @@ if (!registry || !spec) {
   process.exit(2);
 }
 
-const tempDirs = () => new Set(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('ado-npm-exec-')));
+const baseDir = chooseBaseDir();
+const tempDirs = () => new Set(fs.readdirSync(baseDir).filter((n) => n.startsWith('ado-npm-exec-')));
 const before = tempDirs();
 const started = Date.now();
 /** @type {string[]} */

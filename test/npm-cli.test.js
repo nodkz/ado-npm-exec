@@ -86,8 +86,8 @@ test('finds the real npm in this environment', () => {
 
 test('npm argv forces safe settings before the spec and keeps passthrough args last', () => {
   assert.deepEqual(
-    buildNpmArgv({ cli: '/n/npm-cli.js', prefixDir: '/t/d', registryHref: 'https://h/r/', spec: 'pkg@1', args: ['--x', '--'] }),
-    ['/n/npm-cli.js', 'exec', '--prefix=/t/d', '--registry=https://h/r/', ...FORCED_NPM_FLAGS, '--', 'pkg@1', '--x', '--'],
+    buildNpmArgv({ cli: '/n/npm-cli.js', prefixDir: '/t/d', registryHref: 'https://h/r/', cacheDir: '/c', spec: 'pkg@1', args: ['--x', '--'] }),
+    ['/n/npm-cli.js', 'exec', '--prefix=/t/d', '--registry=https://h/r/', '--cache=/c', ...FORCED_NPM_FLAGS, '--', 'pkg@1', '--x', '--'],
   );
   for (const f of ['--yes', '--strict-ssl=true', '--foreground-scripts=false', '--json=false']) {
     assert.ok(FORCED_NPM_FLAGS.includes(f), f);

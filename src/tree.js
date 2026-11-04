@@ -1,12 +1,8 @@
 /**
- * Process-tree helpers for shutting down everything the inner npm started.
- *
- * npm 10 (bundled with Node 20) traps SIGINT/SIGTERM without forwarding them,
- * npm 11 forwards them only to its direct child, and a package's bin may be a
- * launcher that starts the real server or install scripts may still be
- * running. Signalling npm's PID alone can therefore leave processes behind.
- * The child stays in our process group, so a client that signals the whole
- * group still reaches everything directly.
+ * Process-tree helpers for stopping everything the inner npm started: older
+ * npm 10 releases trap SIGINT/SIGTERM and ignore them, newer ones and npm 11
+ * pass them only to their direct child, and a package's bin may be a
+ * launcher. Signalling npm alone can leave processes behind.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -110,9 +106,9 @@ export function signalPid(pid, signal) {
 }
 
 /**
- * Whether this npm forwards SIGINT/SIGTERM to the script it runs (npm 10.9+
+ * Whether this npm passes SIGINT/SIGTERM on to the script it runs (npm 10.9
  * and 11 do; npm 10.2 traps and ignores them). Read from npm's own
- * @npmcli/run-script; unknown counts as "does not forward".
+ * @npmcli/run-script; unknown counts as "does not".
  *
  * @param {string} npmCli path to npm-cli.js
  * @param {(p: string) => string} [read]

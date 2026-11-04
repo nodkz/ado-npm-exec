@@ -127,3 +127,9 @@ test('npm pack ships exactly bin/, src/ and the docs', { skip: npm ? false : 'np
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('no em dashes in the docs, the code or the tests', () => {
+  for (const file of walk(ROOT).filter((f) => /\.(?:md|js|mjs|json|yml)$/.test(f))) {
+    assert.equal(fs.readFileSync(file, 'utf8').includes('\u2014'), false, path.relative(ROOT, file));
+  }
+});
