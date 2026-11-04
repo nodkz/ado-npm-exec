@@ -195,7 +195,7 @@ export async function checkForUpdate(ctx, signal) {
     if (!picked.ok) return failure(picked, true);
     const { version } = picked;
 
-    if (readState(dir, key)?.version === version && isReadyToStart(ctx.cacheDir, registry.href, spec.name, version, { fullMetadata: !!npmPickOptions(ctx.env).before })) {
+    if (readState(dir, key)?.version === version && isReadyToStart(ctx.cacheDir, registry.href, spec.name, version, { fullMetadata: !!npmPickOptions(ctx.env).before, listed: true })) {
       recordVersion(dir, key, base, version, { now: ctx.now(), created: false, repaired: false });
       return { outcome: 'current', version };
     }

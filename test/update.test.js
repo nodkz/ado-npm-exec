@@ -316,7 +316,7 @@ test('a check records only versions npm installed for it, keeps the mark of a fa
     writeState(ctx.dir, ctx.key, { v: 1, registry: FEED, spec: ctx.spec.raw, name, version: '1.2.0', usedAt: 1, installed: ['1.2.0'] });
     // A manual npx with the feed installed 1.3.0 already.
     seedNpxInstall(ctx.cacheDir, { spec: `${name}@1.3.0`, name, version: '1.3.0' });
-    seedPackument(ctx.cacheDir, FEED, name);
+    seedPackument(ctx.cacheDir, FEED, name, { versions: ['1.3.0'] });
     assert.deepEqual(await checkForUpdate(ctx, new AbortController().signal), { outcome: 'updated', version: '1.3.0' });
     assert.deepEqual(readState(ctx.dir, ctx.key)?.installed, ['1.2.0'], 'not ours: cleanup never removes it');
 

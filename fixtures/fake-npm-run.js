@@ -66,8 +66,9 @@ export function fakeNpmRun(cacheDir, behave = {}) {
     const pkg = flag('package') ?? '';
     const name = pkg.slice(0, pkg.lastIndexOf('@'));
     const registry = /** @type {string} */ (flag('registry'));
-    seedNpxInstall(cacheDir, { spec: pkg, name, version: behave.installs ?? pkg.slice(pkg.lastIndexOf('@') + 1), complete: behave.complete ?? true, registry: behave.feed ?? registry });
-    if (behave.packument !== false) seedPackument(cacheDir, registry, name, env.npm_config_before ? { accept: 'application/json' } : {});
+    const version = behave.installs ?? pkg.slice(pkg.lastIndexOf('@') + 1);
+    seedNpxInstall(cacheDir, { spec: pkg, name, version, complete: behave.complete ?? true, registry: behave.feed ?? registry });
+    if (behave.packument !== false) seedPackument(cacheDir, registry, name, { versions: [version], ...(env.npm_config_before ? { accept: 'application/json' } : {}) });
     return result();
   };
   return { calls, run };

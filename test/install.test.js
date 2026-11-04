@@ -127,8 +127,10 @@ test('preinstall failures: a held lock, a lock that cannot be created, npm error
     assert.match(String(await preinstall(s.ctx, { version: '2.0.0' }).then((r) => !r.ok && r.reason)), /from registry\.npmjs\.org, not from the feed/);
     fs.rmSync(path.join(s.cacheDir, '_npx'), { recursive: true, force: true });
     fs.rmSync(path.join(s.cacheDir, '_cacache'), { recursive: true, force: true });
-    s.ctx.run = fakeNpmRun(s.cacheDir, { packument: false }).run;
-    assert.match(String(await preinstall(s.ctx, { version: '2.0.0' }).then((r) => !r.ok && r.reason)), /registry metadata is not in npm's cache/);
+    const noMetadata = fakeNpmRun(s.cacheDir, { packument: false });
+    s.ctx.run = noMetadata.run;
+    assert.match(String(await preinstall(s.ctx, { version: '2.0.0' }).then((r) => !r.ok && r.reason)), /npm's cache has no registry metadata that lists it/);
+    assert.equal(noMetadata.calls.length, 2, 'npm ran again first');
 
     s.ctx.run = fakeNpmRun(s.cacheDir, { aborted: true }).run;
     const stopped = await preinstall(s.ctx, { version: '3.0.0' });
@@ -173,7 +175,7 @@ test('a reinstall moves the old copy aside, puts it back when npm fails, and dro
   const s = setup();
   try {
     const old = seedNpxInstall(s.cacheDir, { spec: `${name}@1.2.3`, name, version: '1.2.3' });
-    seedPackument(s.cacheDir, FEED, name);
+    seedPackument(s.cacheDir, FEED, name, { versions: ['1.2.3'] });
     fs.writeFileSync(path.join(old, 'marker'), 'the copy that failed at start');
 
     s.ctx.run = fakeNpmRun(s.cacheDir, {
@@ -203,7 +205,7 @@ test('preinstall: waits for another process installing the same version and uses
     const other = tryLock(s.ctx.dir, installLockName(`${name}@1.2.3`));
     setTimeout(() => {
       seedNpxInstall(s.cacheDir, { spec: `${name}@1.2.3`, name, version: '1.2.3' });
-      seedPackument(s.cacheDir, FEED, name);
+      seedPackument(s.cacheDir, FEED, name, { versions: ['1.2.3'] });
       other?.release();
     }, 150);
     const npmFake = fakeNpmRun(s.cacheDir);
@@ -238,6 +240,29 @@ test('preinstall: an install without registry metadata is completed, and one fro
     assert.deepEqual(await preinstall(s.ctx, { version: '1.2.4' }), { ok: true, created: true });
     assert.equal(readNpxInstall(s.cacheDir, `${name}@1.2.4`, name).resolved?.startsWith(FEED), true, 'now from the feed');
     assert.deepEqual(leasedDuring, ['1.2.4']);
+  } finally {
+    s.dispose();
+  }
+});
+
+test("preinstall: npm runs again when the registry metadata it cached was lost (another npm rewrote npm's cache index meanwhile)", async () => {
+  const s = setup();
+  try {
+    // What is left: the older metadata, without the version npm just installed.
+    seedPackument(s.cacheDir, FEED, name, { versions: ['1.2.2'] });
+    const lost = fakeNpmRun(s.cacheDir, { packument: false });
+    const fetched = fakeNpmRun(s.cacheDir);
+    /** @type {(readonly string[])[]} */
+    const calls = [];
+    s.ctx.run = (file, args, opts) => {
+      calls.push(args);
+      return (calls.length === 1 ? lost : fetched).run(file, args, opts);
+    };
+    assert.deepEqual(await preinstall(s.ctx, { version: '1.2.3', cacheMode: 'prefer-offline' }), { ok: true, created: true });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].includes('--prefer-offline'), true);
+    assert.equal(calls[1].includes('--prefer-offline'), false, 'npm fetches the metadata again');
+    assert.equal(isCached(s.cacheDir, packumentCacheKey(FEED, name), { version: '1.2.3' }), true);
   } finally {
     s.dispose();
   }
@@ -459,7 +484,7 @@ test('a ready version is claimed under its install lock, never while another pro
   const s = setup();
   try {
     seedNpxInstall(s.cacheDir, { spec: `${name}@1.2.3`, name, version: '1.2.3' });
-    seedPackument(s.cacheDir, FEED, name);
+    seedPackument(s.cacheDir, FEED, name, { versions: ['1.2.3'] });
     const held = tryLock(s.ctx.dir, installLockName(`${name}@1.2.3`));
     /** @type {string[]} */
     const events = [];
@@ -521,7 +546,7 @@ test('a copy that could still start is not deleted when it cannot be moved aside
   const s = setup();
   try {
     const old = seedNpxInstall(s.cacheDir, { spec: `${name}@1.2.3`, name, version: '1.2.3' });
-    seedPackument(s.cacheDir, FEED, name);
+    seedPackument(s.cacheDir, FEED, name, { versions: ['1.2.3'] });
     fs.mkdirSync(s.ctx.dir, { recursive: true });
     fs.writeFileSync(path.join(s.ctx.dir, 'replaced'), 'not a folder');
     const npmFake = fakeNpmRun(s.cacheDir);
@@ -541,7 +566,7 @@ test('a copy that an interrupted reinstall moved aside is put back: by the insta
   const s = setup();
   try {
     const folder = seedNpxInstall(s.cacheDir, { spec: `${name}@1.2.3`, name, version: '1.2.3' });
-    seedPackument(s.cacheDir, FEED, name);
+    seedPackument(s.cacheDir, FEED, name, { versions: ['1.2.3'] });
     const strand = () => {
       backUp(s.ctx.dir, folder);
       assert.equal(fs.existsSync(folder), false);

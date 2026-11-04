@@ -44,20 +44,23 @@ export const EXEC_ACCEPT = 'application/vnd.npm.install-v1+json; q=1.0, applicat
 
 /**
  * Append an entry for the package's registry metadata to npm's HTTP cache,
- * as make-fetch-happen writes it.
+ * as make-fetch-happen writes it. Without `content`, the metadata lists
+ * `versions` and those of the newest earlier entry, as a registry's grows.
  *
  * @param {string} cacheDir
  * @param {string} registryHref
  * @param {string} name
- * @param {{ content?: string, deleted?: boolean, writeContent?: boolean, accept?: string, status?: number }} [opts]
+ * @param {{ content?: string, versions?: string[], deleted?: boolean, writeContent?: boolean, accept?: string, status?: number }} [opts]
  *   deleted: a null integrity; accept: the request's Accept header (default: what npm exec sends)
  */
-export function seedPackument(cacheDir, registryHref, name, { content = '{"name":"x"}', deleted = false, writeContent = true, accept = EXEC_ACCEPT, status } = {}) {
+export function seedPackument(cacheDir, registryHref, name, { content, versions = [], deleted = false, writeContent = true, accept = EXEC_ACCEPT, status } = {}) {
   const key = packumentCacheKey(registryHref, name);
-  const data = Buffer.from(content);
+  const b = hash(key, 'sha256');
+  const bucket = path.join(cacheDir, '_cacache', 'index-v5', b.slice(0, 2), b.slice(2, 4), b.slice(4));
+  const listed = [...new Set([...cachedVersions(cacheDir, bucket), ...versions])];
+  const data = Buffer.from(content ?? JSON.stringify({ name, versions: Object.fromEntries(listed.map((v) => [v, { name, version: v }])) }));
   const digest = crypto.createHash('sha512').update(data).digest('base64');
-  const hex = Buffer.from(digest, 'base64').toString('hex');
-  const contentFile = path.join(cacheDir, '_cacache', 'content-v2', 'sha512', hex.slice(0, 2), hex.slice(2, 4), hex.slice(4));
+  const contentFile = sha512File(cacheDir, digest);
   if (writeContent) {
     fs.mkdirSync(path.dirname(contentFile), { recursive: true });
     fs.writeFileSync(contentFile, data);
@@ -72,9 +75,31 @@ export function seedPackument(cacheDir, registryHref, name, { content = '{"name"
     ...(status === undefined ? {} : { status }),
   };
   const entry = JSON.stringify({ key, integrity: deleted ? null : `sha512-${digest}`, time, size: data.length, metadata });
-  const b = hash(key, 'sha256');
-  const bucket = path.join(cacheDir, '_cacache', 'index-v5', b.slice(0, 2), b.slice(2, 4), b.slice(4));
   fs.mkdirSync(path.dirname(bucket), { recursive: true });
   fs.appendFileSync(bucket, `\n${hash(entry, 'sha1')}\t${entry}`);
   return { key, contentFile, bucket };
+}
+
+/** @param {string} cacheDir @param {string} digest  base64 sha512 */
+function sha512File(cacheDir, digest) {
+  const hex = Buffer.from(digest, 'base64').toString('hex');
+  return path.join(cacheDir, '_cacache', 'content-v2', 'sha512', hex.slice(0, 2), hex.slice(2, 4), hex.slice(4));
+}
+
+/**
+ * The versions the newest entry in an index bucket lists.
+ *
+ * @param {string} cacheDir
+ * @param {string} bucket
+ * @returns {string[]}
+ */
+function cachedVersions(cacheDir, bucket) {
+  try {
+    const last = fs.readFileSync(bucket, 'utf8').trim().split('\n').at(-1) ?? '';
+    const integrity = JSON.parse(last.slice(last.indexOf('\t') + 1)).integrity;
+    const doc = JSON.parse(fs.readFileSync(sha512File(cacheDir, integrity.slice('sha512-'.length)), 'utf8'));
+    return Object.keys(doc.versions ?? {});
+  } catch {
+    return [];
+  }
 }

@@ -118,6 +118,23 @@ test("isCached reads cacache like npm: the newest entry that answers npm exec's 
   }
 });
 
+test('isCached with a version: the metadata that answers npm must list it, or npm exec --offline fails with ETARGET', () => {
+  const root = makeTestRoot('npm-cache-');
+  try {
+    const key = packumentCacheKey(FEED, '@contoso/tool');
+    seedPackument(root, FEED, '@contoso/tool', { versions: ['1.0.0'] });
+    assert.equal(isCached(root, key, { version: '1.0.0' }), true);
+    assert.equal(isCached(root, key, { version: '1.1.0' }), false, 'older metadata');
+    assert.equal(isCached(root, key), true, 'without a version, any metadata counts');
+    seedPackument(root, FEED, '@contoso/tool', { content: '{"versions":{"1.1.0+build.7":{}}}' });
+    assert.equal(isCached(root, key, { version: '1.1.0+build.7' }), true);
+    seedPackument(root, FEED, '@contoso/tool', { content: 'not json' });
+    assert.equal(isCached(root, key, { version: '1.1.0+build.7' }), false, 'unreadable metadata lists nothing');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('isCached: only the full metadata, or an entry for another host, is no answer for npm exec', () => {
   const root = makeTestRoot('npm-cache-');
   try {
@@ -272,6 +289,9 @@ test('isReadyToStart: a usable install of that version from the feed, and its ca
     assert.equal(isInstalledFromFeed(root, FEED, name, '1.2.3'), true);
     seedPackument(root, FEED, name);
     assert.equal(isReadyToStart(root, FEED, name, '1.2.3'), true);
+    assert.equal(isReadyToStart(root, FEED, name, '1.2.3', { listed: true }), false, 'the metadata does not list 1.2.3');
+    seedPackument(root, FEED, name, { versions: ['1.2.3'] });
+    assert.equal(isReadyToStart(root, FEED, name, '1.2.3', { listed: true }), true);
     assert.equal(isReadyToStart(root, 'https://pkgs.dev.azure.com/fabrikam/_packaging/feed/npm/registry/', name, '1.2.3'), false, 'another organization');
     seedNpxInstall(root, { spec: `${name}@2.0.0`, name, version: '2.0.1' });
     assert.equal(isReadyToStart(root, FEED, name, '2.0.0'), false, 'the folder of 2.0.0 holds 2.0.1');

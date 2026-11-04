@@ -41,7 +41,7 @@ if (installStep) {
       const at = spec.lastIndexOf('@');
       const cache = /** @type {string} */ (flag('cache'));
       seedNpxInstall(cache, { spec, name: spec.slice(0, at), version: spec.slice(at + 1), registry });
-      seedPackument(cache, /** @type {string} */ (flag('registry')), spec.slice(0, at));
+      seedPackument(cache, /** @type {string} */ (flag('registry')), spec.slice(0, at), { versions: [spec.slice(at + 1)] });
     }
   }
   process.exit(code);

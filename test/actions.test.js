@@ -67,7 +67,7 @@ test('doctor: a healthy setup, every source on its own, and never a token', asyn
     const token = validJwt({ upn: 'dev@contoso.com' });
     const { env, cache } = doctorEnv(root, token);
     seedNpxInstall(cache, { spec: `${name}@1.2.3`, name, version: '1.2.3' });
-    seedPackument(cache, FEED, name);
+    seedPackument(cache, FEED, name, { versions: ['1.2.3'] });
     signInMemory(stateDir(cache), DOCTOR_TENANT).remember?.('az');
     const tarball = `${FEED}@contoso/tool/-/tool-1.2.3.tgz`;
     const out = capture();
@@ -518,7 +518,7 @@ function prewarmHarness(root, over = {}) {
     installed.push(spec);
     const at = spec.lastIndexOf('@');
     seedNpxInstall(cacheDir, { spec, name, version: spec.slice(at + 1) });
-    seedPackument(cacheDir, FEED, name);
+    seedPackument(cacheDir, FEED, name, { versions: [spec.slice(at + 1)] });
     return ok;
   };
   /** @param {string} raw */
@@ -664,7 +664,7 @@ test('prewarm: a copy that failed at start is installed again, and only then the
     const dir = stateDir(h.cacheDir);
     const key = stateKey(FEED, `${name}@latest`);
     seedNpxInstall(h.cacheDir, { spec: `${name}@1.4.0`, name, version: '1.4.0' });
-    seedPackument(h.cacheDir, FEED, name);
+    seedPackument(h.cacheDir, FEED, name, { versions: ['1.4.0'] });
     fs.mkdirSync(dir, { recursive: true });
     fs.mkdirSync(path.join(dir, 'specs'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'specs', `${key}.json`), JSON.stringify({ v: 1, registry: FEED, spec: `${name}@latest`, name, version: '1.4.0', offlineFailedAt: 7 }));

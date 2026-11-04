@@ -165,6 +165,8 @@ test('real npm: start from the cache without a token, update in the background, 
   assert.equal(install.complete, true, `npm's install in ${install.dir}`);
   assert.ok(fs.readdirSync(path.join(cache, '_npx')).includes(path.basename(npxInstallDir(cache, [`${name}@1.0.0`]))));
   assert.equal(isCached(cache, packumentCacheKey(feed, name)), true, 'packument cache key');
+  assert.equal(isCached(cache, packumentCacheKey(feed, name), { version: '1.0.0' }), true, 'the cached metadata lists the version');
+  assert.equal(isCached(cache, packumentCacheKey(feed, name), { version: '1.1.0' }), false);
 
   // 2. Feed down, no token: the cached version starts with no request from npm.
   down = true;
@@ -191,6 +193,7 @@ test('real npm: start from the cache without a token, update in the background, 
   assert.equal(third.stdout, 'REMOTE-OK@1.0.0 c\n', 'the running server was not replaced');
   assert.match(third.stderr, /installed @contoso\/hello-mcp@1\.1\.0 in the background; the next start uses it/);
   assert.equal(readNpxInstall(cache, `${name}@1.1.0`, name).complete, true);
+  assert.equal(isCached(cache, packumentCacheKey(feed, name), { version: '1.1.0' }), true, "npm's cached metadata lists the update");
   assert.deepEqual(readState(dir, key)?.installed, ['1.0.0', '1.1.0']);
   assert.deepEqual(fs.readdirSync(path.join(root, 'tmp')).filter((n) => n.startsWith('ado-npm-exec-')), [], 'token files removed');
 

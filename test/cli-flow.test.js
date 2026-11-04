@@ -25,7 +25,7 @@ const name = '@contoso/tool';
 /** @param {ReturnType<typeof cliSandbox>} s @param {string} feed @param {string} version */
 function seedCached(s, feed, version) {
   seedNpxInstall(s.cache, { spec: `${name}@${version}`, name, version, registry: feed });
-  seedPackument(s.cache, feed, name);
+  seedPackument(s.cache, feed, name, { versions: [version] });
 }
 
 /** The spec npm was asked to run. @param {any} rec */
@@ -384,7 +384,7 @@ test('a start waits while another process installs the same version, then runs t
     await new Promise((r) => setTimeout(r, 1500));
     assert.equal(fs.existsSync(s.record), false, 'npm does not run while the install is unfinished');
     seedNpxInstall(s.cache, { spec: `${name}@1.3.0`, name, version: '1.3.0', registry: feed });
-    seedPackument(s.cache, feed, name);
+    seedPackument(s.cache, feed, name, { versions: ['1.3.0'] });
     lock.release();
     const r = await pending;
     assert.equal(r.status, 0, r.stderr);
@@ -475,7 +475,7 @@ test('an install of the same version from another registry is never run as ours'
   try {
     // A manual `npx @contoso/tool@1.0.0` from another registry filled the same folder.
     seedNpxInstall(s.cache, { spec: `${name}@1.0.0`, name, version: '1.0.0', registry: 'https://registry.npmjs.org/' });
-    seedPackument(s.cache, FEED, name);
+    seedPackument(s.cache, FEED, name, { versions: ['1.0.0'] });
     const folder = npxInstallDir(s.cache, [`${name}@1.0.0`]);
     const noToken = await runNode([BIN, '--tenant', TENANT, FEED, `${name}@1.0.0`], s.env);
     assert.equal(noToken.status, 3, 'not a start from the cache');

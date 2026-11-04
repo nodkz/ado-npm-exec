@@ -373,7 +373,7 @@ export async function preinstall(ctx, { version, cacheMode, waitMs = 0, ownLease
   const { name } = ctx.spec;
   const runSpec = `${name}@${version}`;
   const fullMetadata = !!npmPickOptions(ctx.env).before;
-  const ready = () => isReadyToStart(cacheDir, registry.href, name, version, { fullMetadata });
+  const ready = () => isReadyToStart(cacheDir, registry.href, name, version, { fullMetadata, listed: true });
   const got = await waitForLock(dir, installLockName(runSpec), { timeoutMs: waitMs, signal: ctx.signal });
   if ('stopped' in got) return STOPPED;
   if ('busy' in got) return fail('busy', waitMs ? `another process has been installing ${runSpec} for over ${minutes(waitMs)}` : `another process is installing ${runSpec}`);
@@ -451,40 +451,53 @@ export async function preinstall(ctx, { version, cacheMode, waitMs = 0, ownLease
       created = true;
     }
     debug(`installing ${runSpec}`);
-    const r = await withNpm(ctx, (prefix, env) =>
-      (ctx.run ?? runCapture)(
-        ctx.npm.node,
-        buildPreinstallArgv({
-          cli: ctx.npm.cli,
-          prefixDir: prefix,
-          registryHref: registry.href,
-          cacheDir,
-          spec: runSpec,
-          cacheMode,
-          extraFlags: [...scriptShellFlags(env, ctx.platform), ...npmFetchFlags(env)],
-        }),
-        {
-          env,
-          timeoutMs,
-          signal: stop.signal,
-          cwd: prefix,
-          onSpawn: (pid) => {
-            lock.addPid(pid);
-            lease?.addPid(pid);
+    const install = (/** @type {import('./run.js').CacheMode | undefined} */ mode) =>
+      withNpm(ctx, (prefix, env) =>
+        (ctx.run ?? runCapture)(
+          ctx.npm.node,
+          buildPreinstallArgv({
+            cli: ctx.npm.cli,
+            prefixDir: prefix,
+            registryHref: registry.href,
+            cacheDir,
+            spec: runSpec,
+            cacheMode: mode,
+            extraFlags: [...scriptShellFlags(env, ctx.platform), ...npmFetchFlags(env)],
+          }),
+          {
+            env,
+            timeoutMs,
+            signal: stop.signal,
+            cwd: prefix,
+            onSpawn: (pid) => {
+              lock.addPid(pid);
+              lease?.addPid(pid);
+            },
           },
-        },
-      ),
-    );
-    check();
-    if (lost) return fail('busy', `another process took over the install of ${runSpec}`);
-    const failure = npmFailure(r, { name, feedHost: registry.host, timeoutMs, debug });
+        ),
+      );
+    /** @param {import('./proc.js').CaptureResult} r @returns {Failure | undefined} */
+    const outcome = (r) => {
+      check();
+      if (lost) return fail('busy', `another process took over the install of ${runSpec}`);
+      return npmFailure(r, { name, feedHost: registry.host, timeoutMs, debug });
+    };
+    const failure = outcome(await install(cacheMode));
     if (failure) return failure;
     const result = readNpxInstall(cacheDir, runSpec, name);
     if (!result.complete || !isUsableInstall(result, registry.href, version)) {
       if (result.complete && !isFromFeedOrg(registry.href, result.resolved)) return fail('other', `npm installed ${runSpec} from ${installOrigin(result)}, not from the feed`);
       return fail('other', `npm finished, but ${runSpec} is not completely installed`);
     }
-    if (!ready()) return fail('other', `npm installed ${runSpec}, but its registry metadata is not in npm's cache`);
+    if (!ready()) {
+      // Another npm that read this metadata meanwhile (a server starting from
+      // npm's cache) rewrites its index without a lock, and an entry written
+      // in between is lost. Asked again, npm fetches the metadata again.
+      debug(`npm's cache has no registry metadata that lists ${runSpec}; running npm again`);
+      const again = outcome(await install(undefined));
+      if (again) return again;
+      if (!ready()) return fail('other', `npm installed ${runSpec}, but npm's cache has no registry metadata that lists it`);
+    }
     done = true;
     return claimed(created);
   } catch (error) {

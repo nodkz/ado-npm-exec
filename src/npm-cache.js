@@ -207,16 +207,19 @@ export function installOrigin(inst) {
 /**
  * Whether `npm exec --offline <name>@<version>` can start: the install is
  * usable (see isInstalledFromFeed) and npm has the package's registry
- * metadata cached.
+ * metadata cached (with `listed`, metadata that lists the version).
  *
  * @param {string} cacheDir
  * @param {string} registryHref
  * @param {string} name
  * @param {string} version
- * @param {{ fullMetadata?: boolean }} [opts]  see isCached
+ * @param {{ fullMetadata?: boolean, listed?: boolean }} [opts]  see isCached
  */
-export function isReadyToStart(cacheDir, registryHref, name, version, opts) {
-  return isInstalledFromFeed(cacheDir, registryHref, name, version) && isCached(cacheDir, packumentCacheKey(registryHref, name), opts);
+export function isReadyToStart(cacheDir, registryHref, name, version, { fullMetadata = false, listed = false } = {}) {
+  return (
+    isInstalledFromFeed(cacheDir, registryHref, name, version) &&
+    isCached(cacheDir, packumentCacheKey(registryHref, name), { fullMetadata, ...(listed ? { version } : {}) })
+  );
 }
 
 /**
@@ -378,13 +381,14 @@ function answersRequest(metadata, accept) {
  * make-fetch-happen: the newest entry that answers the request decides, and
  * its content file must be there. Entries make-fetch-happen skips (no
  * content and no status, a wrong size) are skipped. npm asks for the full
- * metadata when its `before` setting is on (`fullMetadata`).
+ * metadata when its `before` setting is on (`fullMetadata`). With `version`,
+ * the metadata must also list that version.
  *
  * @param {string} cacheDir  npm's cache folder (the one holding `_cacache`)
  * @param {string} key
- * @param {{ fullMetadata?: boolean }} [opts]
+ * @param {{ fullMetadata?: boolean, version?: string }} [opts]
  */
-export function isCached(cacheDir, key, { fullMetadata = false } = {}) {
+export function isCached(cacheDir, key, { fullMetadata = false, version } = {}) {
   const accept = fullMetadata ? FULL_ACCEPT : SHORT_ACCEPT;
   const cacache = path.join(cacheDir, '_cacache');
   const hashed = crypto.createHash('sha256').update(key).digest('hex');
@@ -416,9 +420,19 @@ export function isCached(cacheDir, key, { fullMetadata = false } = {}) {
     // A cached answer without content, or other than 200, is no metadata.
     if (!integrity || (metadata.status !== undefined && metadata.status !== 200)) return false;
     const file = contentPath(cacache, integrity);
-    return !!file && fs.existsSync(file);
+    return !!file && fs.existsSync(file) && (version === undefined || listsVersion(file, version));
   }
   return false;
+}
+
+/**
+ * @param {string} file  cached registry metadata
+ * @param {string} version
+ */
+function listsVersion(file, version) {
+  const versions = readJson(file)?.versions;
+  if (!versions || typeof versions !== 'object') return false;
+  return Object.hasOwn(versions, version) || Object.keys(versions).some((v) => sameVersion(v, version));
 }
 
 /**
