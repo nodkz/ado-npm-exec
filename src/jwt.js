@@ -1,14 +1,13 @@
 /**
- * Local sanity checks for Microsoft Entra ID access tokens. The signature is
- * not verified: Azure DevOps does that. This only catches tokens that cannot
- * work (wrong audience, wrong tenant, expired, or not a JWT at all, e.g. a
- * PAT) so we can fall through to the next provider with a clear reason
- * instead of letting npm fail later with a bare E401.
+ * Local checks for Microsoft Entra ID access tokens: they catch a token that
+ * cannot work (wrong audience or tenant, expired, not a JWT such as a PAT)
+ * with a clear reason, before npm fails with a bare E401. Azure DevOps checks
+ * the signature.
  */
 
 import { ADO_RESOURCE_ID } from './registry.js';
 
-export const MAX_TOKEN_LENGTH = 16384;
+const MAX_TOKEN_LENGTH = 16384;
 const JWT_RE = /^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*$/;
 const ACCEPTED_AUDIENCES = new Set([ADO_RESOURCE_ID, 'https://app.vssps.visualstudio.com']);
 

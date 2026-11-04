@@ -73,6 +73,42 @@ test('rejects non-string input', () => {
   assert.throws(() => validateRegistryUrl(undefined), RegistryError);
 });
 
+/**
+ * @param {string} url
+ * @returns {string} the RegistryError message
+ */
+function refusal(url) {
+  try {
+    validateRegistryUrl(url);
+  } catch (error) {
+    if (error instanceof RegistryError) return error.message;
+    throw error;
+  }
+  throw new Error(`accepted ${url}`);
+}
+
+test('a refused URL is quoted without credentials, query or fragment', () => {
+  const feed = 'pkgs.dev.azure.com/contoso/_packaging/feed/npm/registry/';
+  const notAllowed = 'it contains characters that are not allowed (query, fragment, port, credentials, spaces or backslashes)';
+  const cases = [
+    [`https://user:fake-s3cret@${feed}`, `https://<credentials>@${feed}`, notAllowed],
+    [`https://user:fake@s3cret@${feed}`, `https://<credentials>@${feed}`, notAllowed],
+    [`https://fake-s3cret@${feed}`, `https://<credentials>@${feed}`, notAllowed],
+    [`http://user:fake-s3cret@${feed}`, `http://<credentials>@${feed}`, 'only https:// URLs are allowed'],
+    [`//user:fake-s3cret@${feed}`, `//<credentials>@${feed}`, 'only https:// URLs are allowed'],
+    [`https://${feed}?token=fake-s3cret`, `https://${feed}?<query>`, notAllowed],
+    [`https://${feed}?x=fake-s3cret#y`, `https://${feed}?<query>`, notAllowed],
+    [`https://${feed}#fake-s3cret`, `https://${feed}#<fragment>`, notAllowed],
+    [`https://user:fake?s3cret@${feed}?sig=fake-s3cret`, `https://<credentials>@${feed}?<query>`, notAllowed],
+  ];
+  for (const [input, quoted, reason] of cases) {
+    const message = refusal(input);
+    assert.ok(message.startsWith(`refusing feed URL ${JSON.stringify(quoted)}: ${reason}. Expected https://`), message);
+    assert.equal(message.includes('s3cret'), false, message);
+  }
+  assert.ok(refusal('https://registry.npmjs.org/').startsWith('refusing feed URL "https://registry.npmjs.org/": host registry.npmjs.org is not'));
+});
+
 test('parseSpec accepts registry specs', () => {
   assert.deepEqual(parseSpec('@contoso/tool@latest'), {
     raw: '@contoso/tool@latest',

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildInnerEnv } from '../src/env.js';
+import { buildInnerEnv, fetchUsesProxy, lookupsNeedNpm, npmPickOptions, proxyBlocksFetch, tlsChecksOff } from '../src/env.js';
 
 const base = { npmrcFile: '/tmp/ado-npm-exec-x/.npmrc', registryHost: 'contoso.pkgs.visualstudio.com', scope: 'contoso' };
 
@@ -112,4 +112,44 @@ test('replaces the global config path that `npm exec --prefix=~/` derived', () =
     { ...base, platform: 'win32', execPath: 'C:\\nodejs\\node.exe' },
   );
   assert.equal(win.npm_config_globalconfig, 'C:\\nodejs\\etc\\npmrc');
+});
+
+test('on Windows cmd.exe never runs a command from the current folder before PATH', () => {
+  const opts = { npmrcFile: 'C:\\t\\.npmrc', registryHost: 'pkgs.dev.azure.com', platform: /** @type {NodeJS.Platform} */ ('win32'), execPath: 'C:\\node\\node.exe' };
+  const win = buildInnerEnv({ Path: 'C:\\Windows', nodefaultcurrentdirectoryinexepath: '0' }, opts);
+  assert.equal(win.NoDefaultCurrentDirectoryInExePath, '1');
+  assert.equal(Object.keys(win).filter((k) => k.toLowerCase() === 'nodefaultcurrentdirectoryinexepath').length, 1);
+  const linux = buildInnerEnv({ PATH: '/usr/bin' }, { ...opts, npmrcFile: '/t/.npmrc', platform: 'linux', execPath: '/usr/bin/node' });
+  assert.equal(linux.NoDefaultCurrentDirectoryInExePath, undefined);
+});
+
+test('lookups go to npm behind a proxy or with certificate checks off; npm settings that change its pick are read', () => {
+  assert.equal(tlsChecksOff({ NODE_TLS_REJECT_UNAUTHORIZED: '0' }), true);
+  assert.equal(tlsChecksOff({ NODE_TLS_REJECT_UNAUTHORIZED: '1' }), false);
+  assert.equal(lookupsNeedNpm({}), false);
+  assert.equal(lookupsNeedNpm({ HTTPS_PROXY: 'http://p:8080' }), true);
+  assert.equal(lookupsNeedNpm({ NODE_TLS_REJECT_UNAUTHORIZED: '0' }), true);
+  assert.deepEqual(npmPickOptions({}), {});
+  assert.deepEqual(npmPickOptions({ npm_config_tag: ' beta ', NPM_CONFIG_BEFORE: '2026-01-01' }), { defaultTag: 'beta', before: '2026-01-01' });
+});
+
+test("Node's own proxy support: NODE_USE_ENV_PROXY from Node 22.21 and 24, --use-env-proxy from 22.21 and 24.5", () => {
+  const proxy = { HTTPS_PROXY: 'http://p:8080' };
+  const on = { ...proxy, NODE_USE_ENV_PROXY: '1' };
+  const at = (/** @type {string} */ nodeVersion, /** @type {string[]} */ execArgv = []) => ({ nodeVersion, execArgv });
+  assert.equal(fetchUsesProxy(on, at('24.0.0')), true);
+  assert.equal(fetchUsesProxy(on, at('22.21.0')), true);
+  assert.equal(fetchUsesProxy(on, at('22.20.0')), false);
+  assert.equal(fetchUsesProxy(on, at('23.11.0')), false);
+  assert.equal(fetchUsesProxy(on, at('20.19.0')), false);
+  assert.equal(fetchUsesProxy({ NODE_USE_ENV_PROXY: '1' }, at('24.0.0')), false, 'no proxy variable to use');
+  assert.equal(fetchUsesProxy({ npm_config_https_proxy: 'http://p', NODE_USE_ENV_PROXY: '1' }, at('24.0.0')), false, "npm's own setting is not read by Node");
+  assert.equal(fetchUsesProxy({ http_proxy: 'http://p', NODE_USE_ENV_PROXY: '1' }, at('24.0.0')), true, 'HTTP_PROXY covers https too');
+  assert.equal(fetchUsesProxy(proxy, at('24.5.0', ['--use-env-proxy'])), true);
+  assert.equal(fetchUsesProxy({ ...proxy, NODE_OPTIONS: '--max-old-space-size=100 --use-env-proxy' }, at('22.21.0')), true);
+  assert.equal(fetchUsesProxy(proxy, at('24.4.0', ['--use-env-proxy'])), false, 'the flag came later');
+  assert.equal(fetchUsesProxy(on, at('24.5.0', ['--no-use-env-proxy'])), false, 'the command line wins');
+  assert.equal(fetchUsesProxy({ ...on, NODE_OPTIONS: '--no-use-env-proxy' }, at('24.5.0', ['--use-env-proxy'])), true);
+  assert.equal(proxyBlocksFetch({}), false);
+  assert.equal(proxyBlocksFetch(proxy), !fetchUsesProxy(proxy));
 });

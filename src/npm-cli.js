@@ -72,3 +72,19 @@ export function resolveNpm({
   }
   return undefined;
 }
+
+/**
+ * The version of the npm at `cli` (its package.json), for `engines.npm`.
+ *
+ * @param {string} cli path to npm-cli.js
+ * @param {(p: string) => string} [read]
+ * @returns {string | undefined}
+ */
+export function npmVersionOf(cli, read = (p) => fs.readFileSync(p, 'utf8')) {
+  try {
+    const pkg = JSON.parse(read(path.join(path.dirname(path.dirname(cli)), 'package.json')));
+    return pkg?.name === 'npm' && typeof pkg.version === 'string' ? pkg.version : undefined;
+  } catch {
+    return undefined;
+  }
+}

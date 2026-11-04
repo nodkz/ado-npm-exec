@@ -1,7 +1,7 @@
 /**
  * Discover the Entra ID tenant that owns an Azure DevOps organization from
  * the feed's anonymous 401 response, so az/azureauth request a token for the
- * right tenant. Purely best effort: any failure just means "unknown".
+ * right tenant. Any failure means "unknown".
  */
 
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

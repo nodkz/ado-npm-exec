@@ -6,6 +6,8 @@
  * acquired, so a crafted config cannot point the token at another server.
  */
 
+import { maskUrlCredentials } from './log.js';
+
 /** Well-known, public Entra ID application (resource) ID of Azure DevOps. */
 export const ADO_RESOURCE_ID = '499b84ac-1321-427f-aa17-267ca6975798';
 
@@ -37,15 +39,28 @@ export class RegistryError extends Error {
  */
 
 /**
+ * A refused URL as a message may quote it: no credentials, query or fragment,
+ * since any of them can hold a secret.
+ *
+ * @param {string} input
+ * @returns {string}
+ */
+function maskedUrl(input) {
+  // Mask the userinfo first: a "?" or "#" in a password must not cut it short.
+  return maskUrlCredentials(input).replace(/[?#][\s\S]*/, (rest) => (rest[0] === '?' ? '?<query>' : '#<fragment>'));
+}
+
+/**
  * Validate an Azure Artifacts npm feed URL against the allowlist.
  *
  * @param {string | undefined} input
  * @returns {Registry}
  */
 export function validateRegistryUrl(input) {
+  const shown = typeof input === 'string' ? maskedUrl(input) : input;
   const fail = (/** @type {string} */ why) =>
     new RegistryError(
-      `refusing feed URL ${JSON.stringify(input)}: ${why}. Expected ` +
+      `refusing feed URL ${JSON.stringify(shown)}: ${why}. Expected ` +
         'https://pkgs.dev.azure.com/<org>[/<project>]/_packaging/<feed>/npm/registry/ or ' +
         'https://<org>.pkgs.visualstudio.com[/<project>]/_packaging/<feed>/npm/registry/',
     );

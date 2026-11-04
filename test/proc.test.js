@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findOnPath, buildCommand, runCapture, getEnv, isNodeModulesBin, withoutNodeModulesBins } from '../src/proc.js';
+import { findOnPath, buildCommand, runCapture, getEnv, isNodeModulesBin, STOP_GRACE_MS, withTrustedPath } from '../src/proc.js';
+import { waitFor } from '../fixtures/sandbox.js';
 
 const node = process.execPath;
 const holdPipes = fileURLToPath(new URL('../fixtures/hold-pipes.js', import.meta.url));
@@ -23,16 +24,6 @@ function alive(pid) {
   } catch {
     return false;
   }
-}
-
-/** @param {() => boolean} cond @param {number} ms */
-async function waitFor(cond, ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (cond()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return cond();
 }
 
 test('getEnv is case-insensitive', () => {
@@ -201,12 +192,76 @@ test('workspace node_modules/.bin directories are never used for tools', () => {
     'C:\\CLI2\\wbin\\az.CMD',
   );
 
-  assert.deepEqual(withoutNodeModulesBins({ PATH: '/w/node_modules/.bin:/usr/bin:/x/node_modules/.bin', HOME: '/h' }, 'linux'), {
+  assert.deepEqual(withTrustedPath({ PATH: '/w/node_modules/.bin:/usr/bin:/x/node_modules/.bin', HOME: '/h' }, 'linux'), {
     PATH: '/usr/bin',
     HOME: '/h',
   });
-  assert.deepEqual(withoutNodeModulesBins({ Path: 'C:\\w\\node_modules\\.bin;"C:\\Program Files\\x"', path: 'C:\\a' }, 'win32'), {
+  assert.deepEqual(withTrustedPath({ Path: 'C:\\w\\node_modules\\.bin;"C:\\Program Files\\x"', path: 'C:\\a' }, 'win32'), {
     Path: '"C:\\Program Files\\x"',
     path: 'C:\\a',
   });
+  assert.deepEqual(withTrustedPath({ PATH: ':.:bin:/usr/bin::./x' }, 'linux'), { PATH: '/usr/bin' }, 'empty and relative entries resolve against the current folder');
+  assert.deepEqual(withTrustedPath({ Path: '.;tools;C:\\a;\\\\server\\share' }, 'win32'), { Path: 'C:\\a;\\\\server\\share' });
+});
+
+test('helpers run from a directory no workspace controls', async () => {
+  const { safeWorkingDir } = await import('../src/proc.js');
+  assert.equal(safeWorkingDir('win32', { SystemRoot: 'D:\\Windows' }), 'D:\\Windows');
+  assert.equal(safeWorkingDir('win32', { SYSTEMROOT: 'relative' }), 'C:\\Windows');
+  assert.equal(safeWorkingDir('win32', {}), 'C:\\Windows');
+  assert.equal(safeWorkingDir('linux', {}, () => true), '/bin');
+  assert.equal(safeWorkingDir('linux', {}, () => false), '/');
+});
+
+test('runCapture runs in the given working directory', async () => {
+  const dir = fs.realpathSync(tmp('ado-npm-exec-test-'));
+  try {
+    const r = await runCapture(node, ['-e', 'process.stdout.write(process.cwd())'], { env: process.env, timeoutMs: 10_000, cwd: dir });
+    assert.equal(fs.realpathSync(r.stdout), dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a stopped tool settles only once its whole tree is gone, even when it ignores SIGTERM like npm 10', { skip: isWin }, async () => {
+  const dir = tmp('ado-npm-exec-test-');
+  const pids = path.join(dir, 'pids');
+  try {
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "process.on('SIGTERM', () => {});",
+      `const c = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'ignore' });`,
+      `require('node:fs').writeFileSync(${JSON.stringify(pids)}, process.pid + ' ' + c.pid);`,
+      'setInterval(() => {}, 1000);',
+    ].join('\n');
+    const ac = new AbortController();
+    const pending = runCapture(node, ['-e', script], { env: process.env, timeoutMs: 20_000, signal: ac.signal });
+    assert.ok(await waitFor(() => fs.existsSync(pids) && fs.readFileSync(pids, 'utf8').includes(' '), 10_000));
+    const abortedAt = Date.now();
+    ac.abort();
+    const r = await pending;
+    assert.equal(r.aborted, true);
+    assert.ok(Date.now() - abortedAt >= STOP_GRACE_MS - 100, 'SIGKILL came after the grace time');
+    const [leader, child] = fs.readFileSync(pids, 'utf8').split(' ').map(Number);
+    assert.equal(alive(leader), false, 'the tool is gone');
+    assert.equal(alive(child), false, 'and what it started, before the caller goes on');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runCapture keeps the end of stderr, where npm writes its error code, and reports the pid it started', async () => {
+  const lines = 3000;
+  /** @type {number[]} */
+  const pids = [];
+  const r = await runCapture(
+    process.execPath,
+    ['-e', `for (let i = 0; i < ${lines}; i++) process.stderr.write('npm warn deprecated some-package@1.0.0: this line is filler\\n'); process.stderr.write('npm error code E401\\n'); process.exitCode = 1`],
+    { env: process.env, timeoutMs: 30_000, onSpawn: (pid) => pids.push(pid) },
+  );
+  assert.equal(r.code, 1);
+  assert.ok(r.stderr.length <= 64 * 1024);
+  assert.match(r.stderr, /npm error code E401\n$/);
+  assert.equal(pids.length, 1);
+  assert.ok(Number.isInteger(pids[0]) && pids[0] > 1);
 });

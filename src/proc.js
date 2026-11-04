@@ -1,7 +1,6 @@
 /**
- * Minimal, dependency-free process helpers: PATH lookup that cannot be
- * hijacked through the working directory, and output capture with a hard
- * timeout that tears down the whole process tree.
+ * Process helpers: a PATH lookup that the working directory cannot hijack,
+ * and output capture with a timeout that stops the whole process tree.
  */
 
 import { spawn } from 'node:child_process';
@@ -58,24 +57,31 @@ export function isNodeModulesBin(dir, win) {
 }
 
 /**
- * Remove `node_modules/.bin` entries from PATH (all case variants of the key),
- * for the environment of the authentication helpers.
+ * PATH without the entries a workspace may control: `node_modules/.bin`
+ * folders (`npm exec` puts the workspace's first), and empty or relative
+ * ones (they resolve against the current folder). For the sign-in tools and
+ * every npm step that has the token: they and the programs they start
+ * (`sh`, `git`) must not come from a workspace. All case variants of the key.
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {NodeJS.Platform} [platform]
  * @returns {NodeJS.ProcessEnv}
  */
-export function withoutNodeModulesBins(env, platform = process.platform) {
+export function withTrustedPath(env, platform = process.platform) {
   const win = platform === 'win32';
-  const delimiter = win ? ';' : ':';
+  const p = win ? path.win32 : path.posix;
   /** @type {NodeJS.ProcessEnv} */
   const out = { ...env };
   for (const key of Object.keys(out)) {
     if (key.toLowerCase() !== 'path' || out[key] === undefined) continue;
     out[key] = /** @type {string} */ (out[key])
-      .split(delimiter)
-      .filter((d) => !isNodeModulesBin(win ? d.replace(/^"(.*)"$/, '$1') : d, win))
-      .join(delimiter);
+      .split(p.delimiter)
+      .filter((entry) => {
+        const d = win ? entry.replace(/^"(.*)"$/, '$1') : entry;
+        const absolute = win ? /^(?:[A-Za-z]:[\\/]|\\\\[^\\])/.test(d) : p.isAbsolute(d);
+        return absolute && !isNodeModulesBin(d, win);
+      })
+      .join(p.delimiter);
   }
   return out;
 }
@@ -129,52 +135,25 @@ export function buildCommand(file, args, platform) {
 }
 
 /**
- * Stop a captured child and everything it started. POSIX children are
- * spawned as process-group leaders: the group gets SIGTERM, then SIGKILL
- * after `graceMs` (az writes a token cache; give it a chance to finish).
- * Windows uses taskkill /T /F from System32 (never from PATH).
+ * Kill a process and everything it started, on Windows: taskkill /T /F from
+ * System32 (never from PATH).
  *
  * @param {import('node:child_process').ChildProcess} child
- * @param {NodeJS.Platform} [platform]
  * @param {NodeJS.ProcessEnv} [env]
- * @param {number} [graceMs]
  */
-export function killProcessTree(child, platform = process.platform, env = process.env, graceMs = 1500) {
-  if (child.pid === undefined) return;
-  const pid = child.pid;
-  if (platform === 'win32') {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    const root = getEnv(env, 'SystemRoot') || 'C:\\Windows';
-    try {
-      spawn(path.win32.join(root, 'System32', 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      })
-        .on('error', () => child.kill())
-        .unref();
-      return;
-    } catch {
-      // fall through
-    }
-  } else {
-    try {
-      process.kill(-pid, 'SIGTERM');
-      setTimeout(() => {
-        try {
-          process.kill(-pid, 'SIGKILL');
-        } catch {
-          // group already gone
-        }
-      }, graceMs).unref();
-      return;
-    } catch {
-      // not a group leader; fall through
-    }
-  }
+export function killProcessTree(child, env = process.env) {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  const root = getEnv(env, 'SystemRoot') || 'C:\\Windows';
   try {
-    child.kill('SIGKILL');
+    spawn(path.win32.join(root, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+      .on('error', () => child.kill())
+      .unref();
   } catch {
-    // already gone
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // already gone
+    }
   }
 }
 
@@ -190,25 +169,110 @@ export function killProcessTree(child, platform = process.platform, env = proces
  */
 
 /**
+ * A working directory for the authentication helpers that no workspace
+ * controls: an MCP client starts us in an arbitrary project, and az, azd and
+ * azureauth read configuration from their current directory (azd, for
+ * example, looks for an `azure.yaml` project there and in its parents). Same
+ * choice as @azure/identity: %SystemRoot% on Windows, /bin elsewhere.
+ *
+ * @param {NodeJS.Platform} [platform]
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {(p: string) => boolean} [isDir]
+ * @returns {string}
+ */
+export function safeWorkingDir(platform = process.platform, env = process.env, isDir = defaultIsDir) {
+  if (platform === 'win32') {
+    const root = getEnv(env, 'SystemRoot') || 'C:\\Windows';
+    return path.win32.isAbsolute(root) ? root : 'C:\\Windows';
+  }
+  return isDir('/bin') ? '/bin' : '/';
+}
+
+/** @param {string} p */
+function defaultIsDir(p) {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * @typedef {object} CaptureOptions
  * @property {NodeJS.ProcessEnv} env
  * @property {number} timeoutMs
  * @property {AbortSignal} [signal]
- * @property {number} [maxBytes]
+ * @property {number} [maxBytes]  stdout keeps its first, stderr its last maxBytes (errors come last)
+ * @property {string} [cwd]  working directory (default: ours)
+ * @property {(pid: number) => void} [onSpawn]  told the pid of the started process
  */
+
+/** After a stop, how long the process tree gets for SIGTERM before SIGKILL. */
+export const STOP_GRACE_MS = 1500;
+
+/**
+ * Signal the process group a captured child leads (POSIX), or the tree
+ * (Windows: SIGTERM is taskkill /T /F, SIGKILL kills the child).
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {'SIGTERM' | 'SIGKILL'} sig
+ */
+function signalTree(child, sig) {
+  if (child.pid === undefined) return;
+  if (process.platform === 'win32') {
+    if (sig === 'SIGTERM') killProcessTree(child);
+    else {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+    return;
+  }
+  try {
+    process.kill(-child.pid, sig);
+  } catch {
+    try {
+      child.kill(sig);
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/**
+ * Whether anything of a captured child's tree still runs: its process group
+ * (POSIX), or the child itself (Windows).
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ */
+function treeAlive(child) {
+  if (child.pid === undefined) return false;
+  if (process.platform === 'win32') return child.exitCode === null && child.signalCode === null;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return /** @type {NodeJS.ErrnoException} */ (error).code === 'EPERM';
+  }
+}
 
 /**
  * Run a command with stdin closed and stdout/stderr captured (never
- * inherited: our stdout is the MCP channel). The promise settles on the
- * timer, on abort, or shortly after the process exits, even if a
- * grandchild still holds the pipes open.
+ * inherited: our stdout is the MCP channel). The promise settles shortly
+ * after the process exits, even if a grandchild still holds the pipes open.
+ * On the timer or an abort the process tree is stopped (SIGTERM, then
+ * SIGKILL after STOP_GRACE_MS), and the promise settles only once the tree is
+ * gone (at most a second after SIGKILL): callers release locks and remove
+ * token files after the tool has really stopped.
  *
  * @param {string} file
  * @param {readonly string[]} args
  * @param {CaptureOptions} opts
  * @returns {Promise<CaptureResult>}
  */
-export function runCapture(file, args, { env, timeoutMs, signal, maxBytes = 64 * 1024 }) {
+export function runCapture(file, args, { env, timeoutMs, signal, maxBytes = 64 * 1024, cwd, onSpawn }) {
   return new Promise((resolve) => {
     const base = { code: null, signal: null, stdout: '', stderr: '', timedOut: false, aborted: false };
     /** @type {{ command: string, args: string[], shell: boolean }} */
@@ -219,6 +283,7 @@ export function runCapture(file, args, { env, timeoutMs, signal, maxBytes = 64 *
       cmd = buildCommand(file, args, process.platform);
       child = spawn(cmd.command, cmd.args, {
         env,
+        ...(cwd ? { cwd } : {}),
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         detached: process.platform !== 'win32',
@@ -227,6 +292,14 @@ export function runCapture(file, args, { env, timeoutMs, signal, maxBytes = 64 *
     } catch (error) {
       resolve({ ...base, error: /** @type {Error} */ (error) });
       return;
+    }
+
+    if (child.pid !== undefined) {
+      try {
+        onSpawn?.(child.pid);
+      } catch {
+        // the caller's bookkeeping must not break the capture
+      }
     }
 
     /** @type {Buffer[]} */ const out = [];
@@ -238,8 +311,9 @@ export function runCapture(file, args, { env, timeoutMs, signal, maxBytes = 64 *
       outLen += d.length;
     });
     child.stderr.on('data', (/** @type {Buffer} */ d) => {
-      if (errLen < maxBytes) err.push(d);
+      err.push(d);
       errLen += d.length;
+      while (err.length > 1 && errLen - err[0].length >= maxBytes) errLen -= /** @type {Buffer} */ (err.shift()).length;
     });
 
     let settled = false;
@@ -247,11 +321,14 @@ export function runCapture(file, args, { env, timeoutMs, signal, maxBytes = 64 *
     let aborted = false;
     /** @type {NodeJS.Timeout | undefined} */
     let grace;
+    /** @type {NodeJS.Timeout | undefined} */
+    let stopping;
     const finish = (/** @type {Error | undefined} */ error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(grace);
+      clearInterval(stopping);
       signal?.removeEventListener('abort', onAbort);
       child.stdout.destroy();
       child.stderr.destroy();
@@ -259,16 +336,27 @@ export function runCapture(file, args, { env, timeoutMs, signal, maxBytes = 64 *
         code: child.exitCode,
         signal: child.signalCode,
         stdout: Buffer.concat(out).toString('utf8').slice(0, maxBytes),
-        stderr: Buffer.concat(err).toString('utf8').slice(0, maxBytes),
+        stderr: Buffer.concat(err).toString('utf8').slice(-maxBytes),
         timedOut,
         aborted,
         ...(error ? { error } : {}),
       });
     };
     const stop = () => {
-      killProcessTree(child);
-      child.unref();
-      finish(undefined);
+      if (stopping || settled) return;
+      clearTimeout(timer);
+      const startedAt = Date.now();
+      let killed = false;
+      signalTree(child, 'SIGTERM');
+      stopping = setInterval(() => {
+        if (!treeAlive(child)) return finish(undefined);
+        const elapsed = Date.now() - startedAt;
+        if (!killed && elapsed >= STOP_GRACE_MS) {
+          killed = true;
+          signalTree(child, 'SIGKILL');
+        }
+        if (elapsed >= STOP_GRACE_MS + 1000) finish(undefined);
+      }, 50);
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -283,9 +371,13 @@ export function runCapture(file, args, { env, timeoutMs, signal, maxBytes = 64 *
 
     child.on('error', (error) => finish(error));
     child.on('exit', () => {
+      // While stopping, the interval waits for the whole tree instead.
+      if (stopping) return;
       // 'close' waits for every holder of the pipes; do not wait forever.
       grace = setTimeout(() => finish(undefined), 250);
     });
-    child.on('close', () => finish(undefined));
+    child.on('close', () => {
+      if (!stopping) finish(undefined);
+    });
   });
 }

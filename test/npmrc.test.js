@@ -62,13 +62,14 @@ test('honours a custom tmpdir and removes the dir if writing fails', () => {
 });
 
 /**
- * Fake file system: path -> { uid, gid, mode }.
+ * Fake file system: path -> [uid, gid, mode]. `links` maps an alias to its real path.
  * @param {Record<string, number[]>} entries
+ * @param {Record<string, string>} [links]
  * @returns {import('../src/npmrc.js').FsLike}
  */
-function fakeFs(entries) {
+function fakeFs(entries, links = {}) {
   return {
-    realpath: (p) => p,
+    realpath: (p) => links[p] ?? p,
     stat: (p) => {
       const e = entries[p];
       if (!e) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -77,6 +78,7 @@ function fakeFs(entries) {
   };
 }
 
+// macOS-like: the primary group staff (20) has all local users in it.
 const ME = { uid: 501, gid: 20 };
 const ROOT_DIRS = { '/': [0, 0, 0o40755], '/home': [0, 0, 0o40755], '/var': [0, 0, 0o40755] };
 
@@ -85,9 +87,31 @@ test('isTrustedDir: every ancestor must be owned by root or us and not writable 
   assert.equal(isTrustedDir('/home/u/.cache', { ...ME, fs: f }), true);
   assert.equal(isTrustedDir('/tmp', { ...ME, fs: f }), false, 'world-writable');
   assert.equal(isTrustedDir('/home/other', { ...ME, fs: f }), false, 'owned by another user');
-  assert.equal(isTrustedDir('/home/u/gw', { ...ME, fs: f }), true, 'group-writable by our own group');
+  assert.equal(isTrustedDir('/home/u/gw', { ...ME, fs: f }), false, 'group-writable by staff, which other users are in');
   assert.equal(isTrustedDir('/home/u/ow', { ...ME, fs: f }), false, 'group-writable by another group');
   assert.equal(isTrustedDir('/missing', { ...ME, fs: f }), false);
+});
+
+test('isTrustedDir: group write is trusted only for our primary group when it is a user private group', () => {
+  const LINUX = { uid: 1000, gid: 1000 }; // user private group
+  const f = fakeFs({
+    ...ROOT_DIRS,
+    // A macOS-style home: a root-owned parent, and a home that the shared group staff (20) can write.
+    '/Homes': [0, 80, 0o40755],
+    '/Homes/u': [501, 20, 0o40775],
+    '/Homes/u/.cache': [501, 20, 0o40700],
+    '/home/l': [1000, 1000, 0o40775],
+    '/home/l/.cache': [1000, 1000, 0o40700],
+    '/home/s': [1000, 100, 0o40775],
+    '/home/s/.cache': [1000, 100, 0o40700],
+  });
+  assert.equal(isTrustedDir('/Homes/u/.cache', { ...ME, fs: f }), false, 'macOS: an ancestor that staff can write');
+  assert.equal(isTrustedDir('/Homes/u', { ...ME, fs: f }), false, 'macOS: a home that staff can write');
+  assert.equal(isTrustedDir('/home/l/.cache', { ...LINUX, fs: f }), true, 'Linux: an ancestor that only our private group can write');
+  assert.equal(isTrustedDir('/home/l', { ...LINUX, fs: f }), true);
+  assert.equal(isTrustedDir('/home/s/.cache', { ...LINUX, fs: f }), false, 'an ancestor that another group can write');
+  assert.equal(isTrustedDir('/home/s/.cache', { uid: 1000, gid: 100, fs: f }), false, 'our primary group is not private');
+  assert.equal(isTrustedDir('/home/l/.cache', { uid: 1000, gid: 100, fs: f }), false, 'group 1000 is not our primary group');
 });
 
 test('chooseBaseDir prefers the temp dir, then XDG_RUNTIME_DIR, then ~/.cache', () => {
@@ -107,6 +131,52 @@ test('chooseBaseDir prefers the temp dir, then XDG_RUNTIME_DIR, then ~/.cache', 
     'no home directory is not a crash',
   );
   assert.equal(chooseBaseDir({ ...base, platform: 'win32', tmpdir: 'C:\\Users\\u\\AppData\\Local\\Temp', env: {} }), 'C:\\Users\\u\\AppData\\Local\\Temp');
+});
+
+test('chooseBaseDir returns the real path it checked, not an alias of it', () => {
+  const entries = {
+    ...ROOT_DIRS,
+    '/tmp': [0, 0, 0o41777],
+    '/tmp/shared': [501, 20, 0o40700],
+    '/private': [0, 0, 0o40755],
+    '/private/var': [0, 0, 0o40755],
+    '/private/var/folders': [0, 0, 0o40755],
+    '/private/var/folders/x': [501, 20, 0o40755],
+    '/private/var/folders/x/T': [501, 20, 0o40700],
+    '/home/u': [501, 20, 0o40755],
+    '/home/u/t': [501, 20, 0o40700],
+    '/data': [0, 0, 0o40755],
+    '/data/cache': [501, 20, 0o40700],
+  };
+  const links = {
+    '/var/folders/x/T': '/private/var/folders/x/T', // macOS: /var is a symlink to /private/var
+    '/tmp/link': '/home/u/t',
+    '/home/u/tmp': '/tmp/shared',
+    '/home/u/.cache': '/data/cache',
+  };
+  /** @type {string[]} */
+  const made = [];
+  /** @type {string[]} */
+  const writable = [];
+  const base = {
+    ...ME,
+    fs: fakeFs(entries, links),
+    env: {},
+    homedir: () => '/home/u',
+    mkdir: (/** @type {string} */ p) => {
+      made.push(p);
+    },
+    canWrite: (/** @type {string} */ p) => {
+      writable.push(p);
+      return true;
+    },
+    platform: /** @type {NodeJS.Platform} */ ('darwin'),
+  };
+  assert.equal(chooseBaseDir({ ...base, tmpdir: '/var/folders/x/T' }), '/private/var/folders/x/T');
+  assert.equal(chooseBaseDir({ ...base, tmpdir: '/tmp/link' }), '/home/u/t', 'not /tmp/link, whose parent other users can write');
+  assert.equal(chooseBaseDir({ ...base, tmpdir: '/home/u/tmp' }), '/data/cache', 'an alias of an untrusted dir is skipped');
+  assert.deepEqual(made, ['/home/u/.cache'], '~/.cache is created as given');
+  assert.deepEqual(writable, ['/private/var/folders/x/T', '/home/u/t', '/data/cache'], 'write access is checked on the real path');
 });
 
 test('findShadowingBin walks up to the root', () => {

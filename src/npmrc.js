@@ -1,9 +1,8 @@
 /**
- * The short-lived npm config that carries the token to the inner npm.
- *
- * It lives in a fresh mkdtemp directory (0700) as `.npmrc` (0600, created
- * exclusively), is handed to npm via `npm_config_userconfig`, and is removed
- * as soon as the session ends. The token never appears in argv.
+ * The short-lived npm config of the inner npm, in a fresh mkdtemp folder
+ * (0700) as `.npmrc` (0600, created exclusively), handed over with
+ * `npm_config_userconfig`. One with the token is removed when the npm step
+ * that needs it ends; the server's has none. The token is never in argv.
  */
 
 import fs from 'node:fs';
@@ -18,18 +17,21 @@ const SAFE_NERF_RE = /^\/\/[A-Za-z0-9.:-]+\/[A-Za-z0-9._~%@/-]*\/$/;
 const SAFE_SCOPE_RE = /^[a-z0-9~-][a-z0-9._~-]*$/;
 
 /**
- * @param {{ registry: { href: string, nerfDart: string }, token: string, scope?: string }} input
+ * Without a token (a start from npm's cache, which makes no request) the file
+ * only routes the package to the feed.
+ *
+ * @param {{ registry: { href: string, nerfDart: string }, token?: string, scope?: string }} input
  * @returns {string}
  */
 export function renderNpmrc({ registry, token, scope }) {
   if (!SAFE_HREF_RE.test(registry.href) || !SAFE_NERF_RE.test(registry.nerfDart)) {
     throw new Error('refusing to write an unsafe registry URL to npmrc');
   }
-  if (!isJwtShaped(token)) throw new Error('refusing to write a token that is not a JWT to npmrc');
+  if (token !== undefined && !isJwtShaped(token)) throw new Error('refusing to write a token that is not a JWT to npmrc');
   if (scope !== undefined && !SAFE_SCOPE_RE.test(scope)) throw new Error('refusing to write an unsafe scope to npmrc');
   const lines = [`registry=${registry.href}`];
   if (scope) lines.push(`@${scope}:registry=${registry.href}`);
-  lines.push(`${registry.nerfDart}:_authToken=${token}`);
+  if (token !== undefined) lines.push(`${registry.nerfDart}:_authToken=${token}`);
   return `${lines.join('\n')}\n`;
 }
 
@@ -56,35 +58,53 @@ export class UnsafeTempError extends Error {
 const realFs = { stat: (p) => fs.statSync(p), realpath: (p) => fs.realpathSync(p) };
 
 /**
- * A directory is trusted when it and every ancestor is owned by root or by us
- * and cannot be written by other users. npm looks for
- * `<ancestor>/node_modules/.bin/<spec>` above its --prefix, so a shared,
- * world-writable ancestor such as /tmp would let another user plant a program
- * that runs instead of the package (and can read the token file).
+ * A directory is trusted when its real path and every ancestor up to / are:
+ * - owned by root or by us,
+ * - not world-writable,
+ * - not group-writable, unless the group is our primary group and that is a
+ *   user private group, which we detect as `gid === uid` (user 1000 with group
+ *   1000 on Linux). On macOS all local users share the primary group staff,
+ *   so there a group-writable directory is never trusted.
+ *
+ * npm looks for `<ancestor>/node_modules/.bin/<spec>` above its --prefix, so a
+ * directory that other users can write, such as /tmp, would let them plant a
+ * program that runs instead of the package (and can read the token file).
  *
  * @param {string} dir
- * @param {{ uid: number, gid: number, fs?: FsLike }} who
+ * @param {{ uid: number, gid: number, fs?: FsLike }} who  our uid and primary gid
+ * @returns {boolean}
  */
-export function isTrustedDir(dir, { uid, gid, fs: f = realFs }) {
-  let current;
+export function isTrustedDir(dir, who) {
+  return trustedRealpath(dir, who) !== undefined;
+}
+
+/**
+ * @param {string} dir
+ * @param {{ uid: number, gid: number, fs?: FsLike }} who
+ * @returns {string | undefined} the real path of `dir` when it is trusted (see isTrustedDir)
+ */
+function trustedRealpath(dir, { uid, gid, fs: f = realFs }) {
+  let real;
   try {
-    current = f.realpath(dir);
-    if (!f.stat(current).isDirectory()) return false;
+    real = f.realpath(dir);
+    if (!f.stat(real).isDirectory()) return undefined;
   } catch {
-    return false;
+    return undefined;
   }
+  const privateGroup = gid === uid;
+  let current = real;
   for (;;) {
     let st;
     try {
       st = f.stat(current);
     } catch {
-      return false;
+      return undefined;
     }
-    if (st.uid !== 0 && st.uid !== uid) return false;
-    if (st.mode & 0o002) return false;
-    if (st.mode & 0o020 && st.gid !== gid) return false;
+    if (st.uid !== 0 && st.uid !== uid) return undefined;
+    if (st.mode & 0o002) return undefined;
+    if (st.mode & 0o020 && !(privateGroup && st.gid === gid)) return undefined;
     const parent = path.posix.dirname(current);
-    if (parent === current) return true;
+    if (parent === current) return real;
     current = parent;
   }
 }
@@ -93,12 +113,15 @@ export function isTrustedDir(dir, { uid, gid, fs: f = realFs }) {
  * Where to create the temp directory. Windows uses the per-user %TEMP%. On
  * POSIX the first candidate that is trusted (see isTrustedDir) and writable
  * by us wins: the OS temp dir (per-user on macOS), $XDG_RUNTIME_DIR, then
- * ~/.cache (created 0700 if missing).
+ * ~/.cache (created 0700 if missing). It is returned as its real path, which
+ * is the path that was checked, so the caller creates the temp directory there
+ * and not under an alias: the parents of an alias are not checked (npm still
+ * looks in them), and its symlink can be retargeted after the check.
  *
  * @param {{ platform?: NodeJS.Platform, tmpdir?: string, env?: NodeJS.ProcessEnv,
  *   homedir?: () => string, uid?: number, gid?: number, fs?: FsLike,
  *   mkdir?: (p: string) => void, canWrite?: (p: string) => boolean }} [opts]
- * @returns {string}
+ * @returns {string} on POSIX, the real path of the chosen directory
  */
 export function chooseBaseDir({
   platform = process.platform,
@@ -136,7 +159,8 @@ export function chooseBaseDir({
         continue;
       }
     }
-    if (isTrustedDir(dir, { uid, gid, fs: f }) && canWrite(dir)) return dir;
+    const real = trustedRealpath(dir, { uid, gid, fs: f });
+    if (real !== undefined && canWrite(real)) return real;
   }
   throw new UnsafeTempError(
     `no private directory for temporary files: ${candidates.join(', ')} (or a parent) can be written by other users, ` +

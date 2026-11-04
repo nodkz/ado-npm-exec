@@ -8,44 +8,12 @@ import { FORCED_NPM_FLAGS } from '../src/run.js';
 import { renderNpmrc } from '../src/npmrc.js';
 import { validateRegistryUrl } from '../src/registry.js';
 import { validJwt, TENANT } from '../fixtures/jwt.js';
-import { makeTestRoot } from '../fixtures/sandbox.js';
+import { cliSandbox, installFakeTools, readToolLog, waitFor } from '../fixtures/sandbox.js';
 
 const BIN = fileURLToPath(new URL('../bin/ado-npm-exec.js', import.meta.url));
-const FAKE_NPM = fileURLToPath(new URL('../fixtures/fake-npm/npm-cli.js', import.meta.url));
 const FEED = 'https://contoso.pkgs.visualstudio.com/_packaging/feed/npm/registry/';
 const isWin = process.platform === 'win32';
 const pkgVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
-
-function sandbox() {
-  const root = makeTestRoot('cli-');
-  const tmp = path.join(root, 'tmp');
-  const home = path.join(root, 'home');
-  fs.mkdirSync(tmp);
-  fs.mkdirSync(home);
-  const record = path.join(root, 'record.json');
-  /** @type {NodeJS.ProcessEnv} */
-  const env = {
-    PATH: path.dirname(process.execPath),
-    HOME: home,
-    USERPROFILE: home,
-    TMPDIR: tmp,
-    TEMP: tmp,
-    TMP: tmp,
-    npm_execpath: FAKE_NPM,
-    npm_node_execpath: process.execPath,
-    FAKE_NPM_RECORD: record,
-    ...(isWin ? { SystemRoot: process.env.SystemRoot, PATHEXT: process.env.PATHEXT, ComSpec: process.env.ComSpec } : {}),
-  };
-  return {
-    root,
-    env,
-    record,
-    /** @returns {any} */
-    read: () => JSON.parse(fs.readFileSync(record, 'utf8')),
-    leftovers: () => fs.readdirSync(tmp).filter((n) => n.startsWith('ado-npm-exec-')),
-    dispose: () => fs.rmSync(root, { recursive: true, force: true }),
-  };
-}
 
 /**
  * @param {string[]} args
@@ -56,33 +24,13 @@ function runBin(args, env, opts = {}) {
   return spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 60_000, ...opts });
 }
 
-/** Write a fake `az` that prints `token` and records its arguments. @param {string} dir @param {string} token @param {string} argsFile */
-function writeFakeAz(dir, token, argsFile) {
-  fs.mkdirSync(dir, { recursive: true });
-  if (isWin) {
-    fs.writeFileSync(path.join(dir, 'az.cmd'), `@echo off\r\necho %*> "${argsFile}"\r\necho ${token}\r\n`);
-  } else {
-    fs.writeFileSync(path.join(dir, 'az'), `#!/bin/sh\necho "$*" > '${argsFile}'\necho '${token}'\n`, { mode: 0o755 });
-  }
-}
-
-/** @param {() => boolean} cond @param {number} ms */
-async function waitFor(cond, ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (cond()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return cond();
-}
-
 /** @param {import('node:child_process').ChildProcess} child */
 function exited(child) {
   return new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
 }
 
-test('runs npm exec against the feed with a private npmrc and a clean environment', () => {
-  const s = sandbox();
+test('runs npm exec against the feed with a private npmrc and a clean environment; only the install step gets the token', () => {
+  const s = cliSandbox();
   try {
     const jwt = validJwt();
     const r = runBin(['--registry', FEED, '--', '@contoso/tool@1.0.0', 'serve', '--flag'], {
@@ -100,17 +48,26 @@ test('runs npm exec against the feed with a private npmrc and a clean environmen
 
     const rec = s.read();
     const prefixDir = path.dirname(rec.env.npm_config_userconfig);
+    const cache = path.join(s.root, 'cache');
+    // First the locked install step (output captured), then the run itself.
+    const [install] = s.readSteps();
+    assert.ok(install.argv.includes('--package=@contoso/tool@1.0.0') && install.argv.includes('--call=exit 0'));
+    assert.ok(install.argv.includes(`--cache=${cache}`));
+    assert.equal(install.npmrc, renderNpmrc({ registry: validateRegistryUrl(FEED), token: jwt, scope: 'contoso' }));
     assert.deepEqual(rec.argv, [
       'exec',
       `--prefix=${prefixDir}`,
       `--registry=${FEED}`,
+      `--cache=${cache}`,
       ...FORCED_NPM_FLAGS,
+      ...(isWin ? [] : ['--script-shell=/bin/sh']),
+      '--offline',
       '--',
       '@contoso/tool@1.0.0',
       'serve',
       '--flag',
     ]);
-    assert.equal(rec.npmrc, renderNpmrc({ registry: validateRegistryUrl(FEED), token: jwt, scope: 'contoso' }));
+    assert.equal(rec.npmrc, renderNpmrc({ registry: validateRegistryUrl(FEED), scope: 'contoso' }), 'the server never sees the token');
     if (!isWin) {
       assert.equal(rec.npmrcMode, 0o600);
       assert.equal(rec.dirMode, 0o700);
@@ -130,11 +87,11 @@ test('runs npm exec against the feed with a private npmrc and a clean environmen
 });
 
 test('stdout and stdin belong to the child: nothing added, nothing consumed', () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const out = '{"jsonrpc":"2.0","id":1,"result":{}}\n';
     const input = '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n';
-    const r = runBin(['--verbose', FEED, 'tool'], {
+    const r = runBin(['--verbose', FEED, 'tool@1.0.0'], {
       ...s.env,
       ADO_NPM_EXEC_TOKEN: validJwt(),
       FAKE_NPM_STDOUT: out,
@@ -150,9 +107,9 @@ test('stdout and stdin belong to the child: nothing added, nothing consumed', ()
 });
 
 test('propagates the child exit code', () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
-    const r = runBin([FEED, 'tool'], { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_EXIT: '7' });
+    const r = runBin([FEED, 'tool@1.0.0'], { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_EXIT: '7' });
     assert.equal(r.status, 7);
     assert.deepEqual(s.leftovers(), []);
   } finally {
@@ -161,7 +118,7 @@ test('propagates the child exit code', () => {
 });
 
 test('usage errors exit 2 without touching stdout or running npm', () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     for (const args of [
       [],
@@ -195,13 +152,15 @@ test('help and version go to stderr', () => {
 });
 
 test('no token source: exit 3 with an actionable message and no npm run', () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const r = runBin(['--tenant', TENANT, FEED, 'tool'], s.env);
     assert.equal(r.status, 3);
     assert.equal(r.stdout, '');
-    assert.match(r.stderr, /could not acquire/);
-    assert.match(r.stderr, /Install Azure CLI/);
+    assert.match(r.stderr, /Sign-in needed/);
+    assert.match(r.stderr, /needs a Microsoft Entra ID token/);
+    assert.match(r.stderr, /Install the Azure CLI/);
+    assert.match(r.stderr, new RegExp(`az login --tenant ${TENANT} --allow-no-subscriptions`));
     assert.equal(fs.existsSync(s.record), false);
     assert.deepEqual(s.leftovers(), []);
   } finally {
@@ -210,7 +169,7 @@ test('no token source: exit 3 with an actionable message and no npm run', () => 
 });
 
 test('a PAT in ADO_NPM_EXEC_TOKEN is refused', () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const pat = 'p'.repeat(52);
     const r = runBin([FEED, 'tool'], { ...s.env, ADO_NPM_EXEC_TOKEN: pat });
@@ -224,33 +183,33 @@ test('a PAT in ADO_NPM_EXEC_TOKEN is refused', () => {
 });
 
 test('gets the token from az on PATH (directory with spaces and parentheses)', () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const jwt = validJwt();
-    const azDir = path.join(s.root, 'Azure CLI (x86)', 'wbin');
-    const argsFile = path.join(s.root, 'az-args.txt');
-    writeFakeAz(azDir, jwt, argsFile);
-    const r = runBin(['--tenant', TENANT, FEED, '@contoso/tool'], {
+    const azDir = installFakeTools(path.join(s.root, 'Azure CLI (x86)', 'wbin'), ['az']);
+    const log = path.join(s.root, 'tools.log');
+    const r = runBin(['--tenant', TENANT, FEED, '@contoso/tool@1.0.0'], {
       ...s.env,
       PATH: `${azDir}${path.delimiter}${s.env.PATH}`,
+      FAKE_AZ_TOKEN: jwt,
+      FAKE_TOOL_LOG: log,
     });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, '');
-    assert.equal(
-      fs.readFileSync(argsFile, 'utf8').trim(),
+    assert.deepEqual(readToolLog(log).map((c) => c.args.join(' ')), [
       `account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken --output tsv --tenant ${TENANT}`,
-    );
-    assert.match(s.read().npmrc, new RegExp(`:_authToken=${jwt.replace(/[.]/g, '\\.')}\\n$`));
+    ]);
+    assert.match(s.readSteps()[0].npmrc, new RegExp(`:_authToken=${jwt.replace(/[.]/g, '\\.')}\\n$`));
   } finally {
     s.dispose();
   }
 });
 
 test('SIGTERM removes the npmrc before forwarding the signal', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const ready = path.join(s.root, 'ready');
-    const child = spawn(process.execPath, [BIN, FEED, 'tool'], {
+    const child = spawn(process.execPath, [BIN, FEED, 'tool@1.0.0'], {
       env: { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_WAIT: ready, FAKE_NPM_SIGNAL_EXIT: '143' },
       stdio: 'ignore',
     });
@@ -269,10 +228,10 @@ test('SIGTERM removes the npmrc before forwarding the signal', { skip: isWin }, 
 });
 
 test('SIGHUP is forwarded as SIGTERM (npm only forwards INT/TERM)', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const ready = path.join(s.root, 'ready');
-    const child = spawn(process.execPath, [BIN, FEED, 'tool'], {
+    const child = spawn(process.execPath, [BIN, FEED, 'tool@1.0.0'], {
       env: { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_WAIT: ready },
       stdio: 'ignore',
     });
@@ -287,9 +246,9 @@ test('SIGHUP is forwarded as SIGTERM (npm only forwards INT/TERM)', { skip: isWi
 });
 
 test('a child killed by a signal is mirrored', { skip: isWin }, () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
-    const r = runBin([FEED, 'tool'], { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_KILL_SELF: '1' });
+    const r = runBin([FEED, 'tool@1.0.0'], { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_KILL_SELF: '1' });
     assert.equal(r.signal, 'SIGKILL');
     assert.deepEqual(s.leftovers(), []);
   } finally {
@@ -298,7 +257,7 @@ test('a child killed by a signal is mirrored', { skip: isWin }, () => {
 });
 
 test('a signal during token acquisition kills the provider and exits', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const azDir = path.join(s.root, 'az-bin');
     const pidFile = path.join(s.root, 'az.pid');
@@ -336,14 +295,14 @@ test('a signal during token acquisition kills the provider and exits', { skip: i
  * Start the bin with a fake npm that runs a fake server (optionally behind a
  * launcher) and wait until the server is up.
  *
- * @param {ReturnType<typeof sandbox>} s
+ * @param {ReturnType<typeof cliSandbox>} s
  * @param {NodeJS.ProcessEnv} extra
  */
 async function startWithServer(s, extra) {
   const serverPid = path.join(s.root, 'server.pid');
   const events = path.join(s.root, 'server.events');
   fs.writeFileSync(events, '');
-  const child = spawn(process.execPath, [BIN, FEED, 'tool'], {
+  const child = spawn(process.execPath, [BIN, FEED, 'tool@1.0.0'], {
     env: { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_SERVER_PID: serverPid, FAKE_NPM_SERVER_EVENTS: events, ...extra },
     stdio: 'ignore',
   });
@@ -363,7 +322,7 @@ function gone(pid) {
 }
 
 test('SIGTERM reaches the server even when npm ignores it (npm 10)', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1' });
     const started = Date.now();
@@ -380,7 +339,7 @@ test('SIGTERM reaches the server even when npm ignores it (npm 10)', { skip: isW
 });
 
 test('SIGTERM reaches a server started by a launcher that does not forward it', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_LAUNCHER: '1' });
     run.child.kill('SIGTERM');
@@ -393,7 +352,7 @@ test('SIGTERM reaches a server started by a launcher that does not forward it', 
 });
 
 test('a second signal kills a server that ignores SIGTERM', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_SERVER_MODE: 'ignore' });
     run.child.kill('SIGTERM');
@@ -411,7 +370,7 @@ test('a second signal kills a server that ignores SIGTERM', { skip: isWin }, asy
 });
 
 test('a server that ignores SIGTERM is killed after 5 seconds', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_SERVER_MODE: 'ignore' });
     const started = Date.now();
@@ -426,7 +385,7 @@ test('a server that ignores SIGTERM is killed after 5 seconds', { skip: isWin },
 });
 
 test('when the parent dies without signalling, the tree is stopped and the token removed', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const ready = path.join(s.root, 'ready');
     const binPidFile = path.join(s.root, 'bin.pid');
@@ -435,7 +394,7 @@ test('when the parent dies without signalling, the tree is stopped and the token
       process.execPath,
       [
         '-e',
-        `const c = require('child_process').spawn(process.execPath, ${JSON.stringify([BIN, FEED, 'tool'])}, { stdio: 'ignore' });
+        `const c = require('child_process').spawn(process.execPath, ${JSON.stringify([BIN, FEED, 'tool@1.0.0'])}, { stdio: 'ignore' });
          require('fs').writeFileSync(${JSON.stringify(binPidFile)}, String(c.pid));
          setInterval(() => {}, 1000);`,
       ],
@@ -455,7 +414,7 @@ test('when the parent dies without signalling, the tree is stopped and the token
 });
 
 test('refuses to run when a file would shadow the package from the feed', () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     // npm would run <ancestor of the temp dir>/node_modules/.bin/<spec> instead.
     const bin = path.join(s.root, 'tmp', 'node_modules', '.bin');
@@ -473,7 +432,7 @@ test('refuses to run when a file would shadow the package from the feed', () => 
 });
 
 test('refuses a temp directory that other users can write to', { skip: isWin }, () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const shared = path.join(s.root, 'shared');
     fs.mkdirSync(shared);
@@ -491,19 +450,39 @@ test('refuses a temp directory that other users can write to', { skip: isWin }, 
 });
 
 test('a duplicate signal within a second does not force-kill the server', { skip: isWin }, async () => {
-  const s = sandbox();
+  const s = cliSandbox();
   try {
     const run = await startWithServer(s, { FAKE_NPM_IGNORE_SIGNALS: '1', FAKE_NPM_SERVER_MODE: 'ignore' });
-    // What a forwarding outer npm or a process-group kill produces.
+    // What a forwarding outer npm or a process-group kill produces: the same
+    // signal twice, within a second (counted from the signal, not from when
+    // the server reported it, which is late on a busy machine).
     run.child.kill('SIGTERM');
-    await waitFor(() => run.events().length > 0, 3000);
     await new Promise((r) => setTimeout(r, 150));
     run.child.kill('SIGTERM');
-    await new Promise((r) => setTimeout(r, 1500));
+    await waitFor(() => run.events().length > 0, 3000);
+    await new Promise((r) => setTimeout(r, 1000));
     assert.equal(gone(run.pid), false, 'still running: no premature SIGKILL');
     run.child.kill('SIGTERM');
     await run.done;
     assert.ok(await waitFor(() => gone(run.pid), 3000), 'a later signal still forces');
+  } finally {
+    s.dispose();
+  }
+});
+
+test('a client that stops reading our stderr does not crash us (EPIPE)', { skip: isWin }, async () => {
+  const s = cliSandbox();
+  try {
+    const child = spawn(process.execPath, [BIN, '--verbose', FEED, 'tool@1.0.0'], {
+      env: { ...s.env, ADO_NPM_EXEC_TOKEN: validJwt(), FAKE_NPM_SLEEP_MS: '800' },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    child.stderr?.destroy();
+    const { code, signal } = /** @type {any} */ (await exited(child));
+    assert.equal(signal, null);
+    assert.equal(code, 0, 'npm ran to the end and its exit code came through');
+    assert.ok(fs.existsSync(s.record), 'npm ran');
+    assert.deepEqual(s.leftovers(), [], 'the token file was removed');
   } finally {
     s.dispose();
   }
