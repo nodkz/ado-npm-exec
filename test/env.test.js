@@ -2,7 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildInnerEnv, fetchUsesProxy, lookupsNeedNpm, npmPickOptions, proxyBlocksFetch, tlsChecksOff } from '../src/env.js';
 
-const base = { npmrcFile: '/tmp/ado-npm-exec-x/.npmrc', registryHost: 'contoso.pkgs.visualstudio.com', scope: 'contoso' };
+const base = {
+  npmrcFile: '/tmp/ado-npm-exec-x/.npmrc',
+  registryHost: 'contoso.pkgs.visualstudio.com',
+  scope: 'contoso',
+  platform: /** @type {NodeJS.Platform} */ ('linux'),
+};
 
 test('strips the outer npm exec config that would override the temp npmrc', () => {
   const env = buildInnerEnv(

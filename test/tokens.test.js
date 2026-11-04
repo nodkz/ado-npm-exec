@@ -44,7 +44,7 @@ function harness(answers, { missing = [] } = {}) {
   const sleep = async (/** @type {number} */ ms) => {
     sleeps.push(ms);
   };
-  return { calls, sleeps, opts: { find, run, sleep, random: () => 0.5, cwd: '/safe' } };
+  return { calls, sleeps, opts: { find, run, sleep, random: () => 0.5, cwd: '/safe', platform: /** @type {NodeJS.Platform} */ ('linux') } };
 }
 
 test('ADO_NPM_EXEC_TOKEN wins and no tool runs', async () => {
@@ -192,7 +192,7 @@ test('az and azureauth never see workspace node_modules/.bin on PATH', async () 
     azd: { code: 1, stderr: 'ERROR: not logged in, run `azd auth login` to login' },
     azureauth: { stdout: `Bearer ${validJwt()}` },
   });
-  await acquireToken({ env: { PATH: '/w/node_modules/.bin:/usr/bin' }, platform: 'linux', ...h.opts });
+  await acquireToken({ env: { PATH: '/w/node_modules/.bin:/usr/bin' }, ...h.opts });
   assert.deepEqual(h.calls.map((c) => c.env.PATH), ['/usr/bin', '/usr/bin', '/usr/bin']);
   assert.deepEqual(h.calls.map((c) => c.cwd), ['/safe', '/safe', '/safe'], 'tools never run in the workspace');
   assert.deepEqual(withTrustedPath({ PATH: '/a/node_modules/.bin:/b' }, 'linux'), { PATH: '/b' });
