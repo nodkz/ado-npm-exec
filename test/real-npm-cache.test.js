@@ -7,7 +7,9 @@
 //   token in the npmrc;
 // - `npm exec --package=<spec> --call "exit 0"` installs the same folder
 //   without running the package;
-// - a newer version installed in the background is what the next start runs.
+// - a newer version installed in the background is what the next start runs;
+// - `npm view` caches only the full metadata: the install of a version npm
+//   picked must let npm exec ask for the short form again.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -222,4 +224,18 @@ test('real npm: --prewarm installs without running, and the start needs no netwo
   const start = await run(['--registry', 'ignored', '--', `${name}@~1.0.0`, 'e'], { env: env({ npm_config_cache: cache }) });
   assert.equal(start.status, 0, start.stderr);
   assert.equal(start.stdout, 'REMOTE-OK@1.0.0 e\n');
+});
+
+test("real npm: when npm picks the version, a new version installs although npm's cache holds older short metadata", { skip, timeout: 300_000 }, async () => {
+  down = false;
+  published = ['1.0.0'];
+  // Certificate checks off: npm picks the version (npm view), as behind a proxy fetch does not use.
+  const npmPicks = env({ npm_config_cache: path.join(root, 'cache-npm-picks'), ADO_NPM_EXEC_TOKEN: validJwt(), NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+  const first = await run(['--registry', 'ignored', '--', `${name}@latest`, 'f'], { env: npmPicks });
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stdout, 'REMOTE-OK@1.0.0 f\n');
+  published = ['1.0.0', '1.1.0'];
+  const fresh = await run(['--always-fresh', '--registry', 'ignored', '--', `${name}@latest`, 'g'], { env: npmPicks });
+  assert.equal(fresh.status, 0, fresh.stderr);
+  assert.equal(fresh.stdout, 'REMOTE-OK@1.1.0 g\n');
 });

@@ -258,10 +258,9 @@ test("preinstall: npm runs again when the registry metadata it cached was lost (
       calls.push(args);
       return (calls.length === 1 ? lost : fetched).run(file, args, opts);
     };
-    assert.deepEqual(await preinstall(s.ctx, { version: '1.2.3', cacheMode: 'prefer-offline' }), { ok: true, created: true });
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0].includes('--prefer-offline'), true);
-    assert.equal(calls[1].includes('--prefer-offline'), false, 'npm fetches the metadata again');
+    assert.deepEqual(await preinstall(s.ctx, { version: '1.2.3' }), { ok: true, created: true });
+    assert.equal(calls.length, 2, 'npm fetches the metadata again');
+    assert.equal(calls.some((args) => args.includes('--prefer-offline')), false);
     assert.equal(isCached(s.cacheDir, packumentCacheKey(FEED, name), { version: '1.2.3' }), true);
   } finally {
     s.dispose();
@@ -371,21 +370,21 @@ test('pickVersion asks the feed first, and goes to npm at once where only npm ca
       asked.push(o.spec.raw);
       return answer;
     };
-    assert.deepEqual(await pickVersion(s.ctx, { resolve }), { ok: true, version: '1.2.3', metadataCached: false });
+    assert.deepEqual(await pickVersion(s.ctx, { resolve }), { ok: true, version: '1.2.3' });
     assert.equal(npmFake.calls.length, 0);
 
     answer = { kind: 'unsupported', detail: 'odd range' };
-    assert.deepEqual(await pickVersion(s.ctx, { resolve }), { ok: true, version: '2.0.0', metadataCached: true });
+    assert.deepEqual(await pickVersion(s.ctx, { resolve }), { ok: true, version: '2.0.0' });
     assert.equal(npmFake.calls.length, 1);
 
     // A proxy this process's fetch does not use: no direct request at all.
     s.ctx.env = { HTTPS_PROXY: 'http://proxy.example:8080' };
     asked.length = 0;
-    assert.deepEqual(await pickVersion(s.ctx, { resolve }), { ok: true, version: '2.0.0', metadataCached: true });
+    assert.deepEqual(await pickVersion(s.ctx, { resolve }), { ok: true, version: '2.0.0' });
     assert.deepEqual(asked, []);
     s.ctx.spec = { raw: `${name}@1.0.0`, name, scope: 'contoso', range: '1.0.0' };
     answer = { kind: 'resolved', version: '1.0.0', via: 'exact' };
-    assert.deepEqual(await pickVersion(s.ctx, { resolve }), { ok: true, version: '1.0.0', metadataCached: false }, 'an exact version needs no request');
+    assert.deepEqual(await pickVersion(s.ctx, { resolve }), { ok: true, version: '1.0.0' }, 'an exact version needs no request');
     s.ctx.env = { NODE_TLS_REJECT_UNAUTHORIZED: '0' };
     s.ctx.spec = { raw: `${name}@latest`, name, scope: 'contoso', range: 'latest' };
     asked.length = 0;

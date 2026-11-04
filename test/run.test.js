@@ -29,7 +29,6 @@ test('npm exec argv: cache modes and extra flags before the spec', () => {
   const common = { cli: '/npm-cli.js', prefixDir: '/t', registryHref: 'https://f/', cacheDir: '/c', spec: 'tool@1.0.0', args: ['a'] };
   assert.deepEqual(buildNpmArgv(common), ['/npm-cli.js', 'exec', '--prefix=/t', '--registry=https://f/', '--cache=/c', ...FORCED_NPM_FLAGS, '--', 'tool@1.0.0', 'a']);
   assert.deepEqual(buildNpmArgv({ ...common, cacheMode: 'offline', extraFlags: ['--x'] }).slice(-5), ['--x', '--offline', '--', 'tool@1.0.0', 'a']);
-  assert.deepEqual(buildNpmArgv({ ...common, cacheMode: 'prefer-offline' }).slice(-4), ['--prefer-offline', '--', 'tool@1.0.0', 'a']);
   assert.deepEqual(buildNpmArgv({ ...common, cacheMode: 'online' }).slice(-3), ['--', 'tool@1.0.0', 'a']);
 });
 

@@ -239,7 +239,7 @@ test('behind a proxy fetch does not use, npm picks the version at once (a tag wi
       assert.equal(ask.cwd, path.join(fs.realpathSync(ctx.baseDir), path.basename(path.dirname(rc))), 'in its own private folder');
       assert.equal(npmFake.calls.some((call) => call.args.includes(`--package=${name}@${range}`)), false, 'the folder of the spec as written is never used');
       assert.ok(install.args.includes(`--package=${name}@1.5.0`));
-      assert.ok(install.args.includes('--prefer-offline'), 'the exact install reads what npm just cached');
+      assert.equal(install.args.includes('--prefer-offline'), false, "npm view caches only the full metadata: npm exec asks for the short form again");
       assert.equal(readState(ctx.dir, ctx.key)?.version, '1.5.0');
     } finally {
       c.dispose();

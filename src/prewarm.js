@@ -111,7 +111,7 @@ export async function runPrewarm(o) {
       const state = readState(dir, key);
       // The copy of this version failed at start: install it again.
       const reinstall = !!state?.offlineFailedAt && state.version === version;
-      const pre = await preinstall(ctx, { version, waitMs: INSTALL_WAIT_MS, reinstall, ...(picked.metadataCached ? { cacheMode: /** @type {const} */ ('prefer-offline') } : {}) });
+      const pre = await preinstall(ctx, { version, waitMs: INSTALL_WAIT_MS, reinstall });
       if (!pre.ok) {
         if (pre.kind === 'stopped' || ac.signal.aborted) return interrupted();
         report(pre);

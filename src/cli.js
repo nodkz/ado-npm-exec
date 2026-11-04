@@ -512,7 +512,6 @@ async function launch(c) {
       ownLeases: [lease?.file],
       reinstall,
       onReady: () => claim(version),
-      ...(picked.metadataCached ? { cacheMode: /** @type {const} */ ('prefer-offline') } : {}),
     });
     if (!pre.ok) return failed(pre);
     recordVersion(dir, key, base, version, { now: now(), created: pre.created, repaired: pre.created, used: true });

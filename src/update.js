@@ -199,7 +199,7 @@ export async function checkForUpdate(ctx, signal) {
       recordVersion(dir, key, base, version, { now: ctx.now(), created: false, repaired: false });
       return { outcome: 'current', version };
     }
-    const pre = await preinstall(install, { version, ...(picked.metadataCached ? { cacheMode: /** @type {const} */ ('prefer-offline') } : {}) });
+    const pre = await preinstall(install, { version });
     if (!pre.ok) return failure(pre, false);
     recordVersion(dir, key, base, version, { now: ctx.now(), created: pre.created, repaired: pre.created });
     await collectGarbage({ cacheDir: ctx.cacheDir, dir, names: [spec.name], now: ctx.now(), debug });

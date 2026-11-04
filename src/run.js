@@ -106,18 +106,14 @@ export function npmFetchFlags(innerEnv, readFile = (p) => fs.readFileSync(p, 'ut
 /**
  * How the inner npm may use the network:
  * - 'online': npm's default (it revalidates registry metadata);
- * - 'offline': cache only, no request at all (a start from npm's cache);
- * - 'prefer-offline': cached data without revalidation, the network for
- *   anything missing.
+ * - 'offline': cache only, no request at all (a start from npm's cache).
  *
- * @typedef {'online' | 'offline' | 'prefer-offline'} CacheMode
+ * @typedef {'online' | 'offline'} CacheMode
  */
 
 /** @param {CacheMode | undefined} mode @returns {string[]} */
 function cacheFlags(mode) {
-  if (mode === 'offline') return ['--offline'];
-  if (mode === 'prefer-offline') return ['--prefer-offline'];
-  return [];
+  return mode === 'offline' ? ['--offline'] : [];
 }
 
 /**
@@ -154,11 +150,11 @@ export function buildNpmArgv({ cli, spec, args, cacheMode, extraFlags = [], ...b
  * Its output is captured: no colors.
  *
  * @param {{ cli: string, prefixDir: string, registryHref: string, cacheDir: string, spec: string,
- *   cacheMode?: CacheMode, extraFlags?: readonly string[] }} input
+ *   extraFlags?: readonly string[] }} input
  * @returns {string[]}
  */
-export function buildPreinstallArgv({ cli, spec, cacheMode, extraFlags = [], ...base }) {
-  return [cli, 'exec', ...npmBaseArgs(base), '--color=false', ...extraFlags, ...cacheFlags(cacheMode), `--package=${spec}`, '--call=exit 0'];
+export function buildPreinstallArgv({ cli, spec, extraFlags = [], ...base }) {
+  return [cli, 'exec', ...npmBaseArgs(base), '--color=false', ...extraFlags, `--package=${spec}`, '--call=exit 0'];
 }
 
 /**

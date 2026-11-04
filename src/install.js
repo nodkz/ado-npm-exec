@@ -318,8 +318,7 @@ function lookupFailure(res) {
  * @param {InstallContext} ctx
  * @param {{ resolve: typeof import('./resolve.js').resolveSpec, npmVersion?: string, npmWhenUnanswered?: boolean }} how
  *   npmWhenUnanswered: npm tries too when the feed does not answer our lookup (nothing else could start)
- * @returns {Promise<{ ok: true, version: string, metadataCached: boolean } | Failure>}
- *   metadataCached: npm just cached the registry metadata
+ * @returns {Promise<{ ok: true, version: string } | Failure>}
  */
 export async function pickVersion(ctx, { resolve, npmVersion, npmWhenUnanswered = false }) {
   const { spec, env, debug } = ctx;
@@ -330,21 +329,19 @@ export async function pickVersion(ctx, { resolve, npmVersion, npmWhenUnanswered 
     if (ctx.signal?.aborted) return STOPPED;
     if (res.kind === 'resolved') {
       debug(res.via === 'exact' ? `version ${res.version}` : `${spec.raw} is ${res.version} (from the ${res.via})`);
-      return { ok: true, version: res.version, metadataCached: false };
+      return { ok: true, version: res.version };
     }
     if (res.kind !== 'unsupported' && !(res.kind === 'unavailable' && npmWhenUnanswered)) return lookupFailure(res);
     debug(`${res.detail}: npm picks the version`);
   } else {
     debug(`${tlsChecksOff(env) ? 'certificate checks are off' : "Node's fetch cannot use the proxy"}: npm picks the version`);
   }
-  const viaNpm = await resolveWithNpm(ctx);
-  return viaNpm.ok ? { ...viaNpm, metadataCached: true } : viaNpm;
+  return resolveWithNpm(ctx);
 }
 
 /**
  * @typedef {object} PreinstallOptions
  * @property {string} version      the exact version to install
- * @property {import('./run.js').CacheMode} [cacheMode]
  * @property {number} [waitMs]     how long to wait for another process installing the same folder
  * @property {(string | undefined)[]} [ownLeases]  lease files of this process
  * @property {boolean} [reinstall] install again although the folder looks complete (it failed at start)
@@ -368,7 +365,7 @@ export async function pickVersion(ctx, { resolve, npmVersion, npmWhenUnanswered 
  * @param {PreinstallOptions} o
  * @returns {Promise<{ ok: true, created: boolean } | Failure>}  created: npm created the folder
  */
-export async function preinstall(ctx, { version, cacheMode, waitMs = 0, ownLeases = [], reinstall = false, onReady = () => {}, timeoutMs = NPM_TIMEOUT_MS, refreshMs = 10_000 }) {
+export async function preinstall(ctx, { version, waitMs = 0, ownLeases = [], reinstall = false, onReady = () => {}, timeoutMs = NPM_TIMEOUT_MS, refreshMs = 10_000 }) {
   const { registry, cacheDir, dir, debug } = ctx;
   const { name } = ctx.spec;
   const runSpec = `${name}@${version}`;
@@ -451,7 +448,9 @@ export async function preinstall(ctx, { version, cacheMode, waitMs = 0, ownLease
       created = true;
     }
     debug(`installing ${runSpec}`);
-    const install = (/** @type {import('./run.js').CacheMode | undefined} */ mode) =>
+    // No --prefer-offline, also when npm picked the version: its pick caches
+    // only the full metadata, and npm exec would read an older short form.
+    const install = () =>
       withNpm(ctx, (prefix, env) =>
         (ctx.run ?? runCapture)(
           ctx.npm.node,
@@ -461,7 +460,6 @@ export async function preinstall(ctx, { version, cacheMode, waitMs = 0, ownLease
             registryHref: registry.href,
             cacheDir,
             spec: runSpec,
-            cacheMode: mode,
             extraFlags: [...scriptShellFlags(env, ctx.platform), ...npmFetchFlags(env)],
           }),
           {
@@ -482,7 +480,7 @@ export async function preinstall(ctx, { version, cacheMode, waitMs = 0, ownLease
       if (lost) return fail('busy', `another process took over the install of ${runSpec}`);
       return npmFailure(r, { name, feedHost: registry.host, timeoutMs, debug });
     };
-    const failure = outcome(await install(cacheMode));
+    const failure = outcome(await install());
     if (failure) return failure;
     const result = readNpxInstall(cacheDir, runSpec, name);
     if (!result.complete || !isUsableInstall(result, registry.href, version)) {
@@ -494,7 +492,7 @@ export async function preinstall(ctx, { version, cacheMode, waitMs = 0, ownLease
       // npm's cache) rewrites its index without a lock, and an entry written
       // in between is lost. Asked again, npm fetches the metadata again.
       debug(`npm's cache has no registry metadata that lists ${runSpec}; running npm again`);
-      const again = outcome(await install(undefined));
+      const again = outcome(await install());
       if (again) return again;
       if (!ready()) return fail('other', `npm installed ${runSpec}, but npm's cache has no registry metadata that lists it`);
     }
